@@ -476,6 +476,7 @@ public sealed class LivingDexExecutor(
         var backups = new Dictionary<string, string>(StringComparer.Ordinal);
         var bankAdded = new List<Guid>();
         var bankArranged = false;
+        string? writingDocumentId = null;
 
         // Destination first: from here on a crash can leave a duplicate, never a lost Pokémon.
         var order = staging.Saves.Values
@@ -510,8 +511,10 @@ public sealed class LivingDexExecutor(
                 if (!current.Span.SequenceEqual(state.Original))
                     throw new LivingDexAbortException($"{state.Save.GameLabel} changed on disk during the run - is it open in an emulator?");
                 var candidate = state.Session.Serialize().ToArray();
+                writingDocumentId = state.Save.DocumentId;
                 var receipt = await writer.WriteScopedAsync(state.Save.DocumentId, state.Snapshot, candidate,
                     new WriteScope([.. state.Scope]), ChangeLine(state), CancellationToken.None).ConfigureAwait(false);
+                writingDocumentId = null;
                 if (receipt.Changed)
                 {
                     written.Add((state, candidate));
@@ -538,9 +541,16 @@ public sealed class LivingDexExecutor(
             staging.Committed = true;
             var outcomes = staging.Outcomes.Select(o => o.Status == LivingDexStepStatus.Staged
                 ? o with { Status = LivingDexStepStatus.Failed, Message = cancelled ? "Cancelled." : "Undone." } : o).ToList();
-            var summary = cancelled
-                ? rolledBack ? "Cancelled: every save was put back exactly as it was." : "Cancelled before anything was written."
-                : $"Stopped: {error.Message} " + (rolledBack ? "Every save was put back exactly as it was." : "Nothing was written.");
+            var summary = cancelled ? "Cancelled." : $"Stopped: {error.Message}";
+            if (error is SaveWriteFailedException failedWrite)
+            {
+                if (writingDocumentId is not null) backups[writingDocumentId] = failedWrite.BackupId;
+                // A provider may have partially written the failing document. It never
+                // entered the completed list, so do not claim rollback recovered it.
+                summary += " The failed document may need restoration; its restore point is preserved.";
+            }
+            else if (rollbackError is null)
+                summary += rolledBack ? " Every save was put back exactly as it was." : " Nothing was written.";
             if (rollbackError is not null) summary += $" Rollback problem: {rollbackError} Use Restore points to recover.";
             progress?.Report(new LivingDexProgress(LivingDexPhase.Finished, total, total, summary));
             return new LivingDexRunResult(false, rolledBack, summary, outcomes, backups, plan.CoveredBefore, plan.CoveredBefore, error.Message);

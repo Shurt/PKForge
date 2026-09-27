@@ -171,8 +171,10 @@ public sealed class AppUpdateService
         var callback = new Android.Content.Intent(context, Java.Lang.Class.FromType(typeof(UpdateInstallReceiver)))
             .SetAction(UpdateInstallReceiver.ActionName);
         var flags = Android.App.PendingIntentFlags.UpdateCurrent;
-        if (Android.OS.Build.VERSION.SdkInt >= Android.OS.BuildVersionCodes.M)
-            flags |= Android.App.PendingIntentFlags.Immutable;
+        // PackageInstaller adds status and confirmation details to this explicit callback.
+        // Android 12+ therefore requires a mutable PendingIntent; older versions default to mutable.
+        if (Android.OS.Build.VERSION.SdkInt >= Android.OS.BuildVersionCodes.S)
+            flags |= Android.App.PendingIntentFlags.Mutable;
         var pending = Android.App.PendingIntent.GetBroadcast(
             context,
             UpdateInstallReceiver.RequestCode,

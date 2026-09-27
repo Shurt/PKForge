@@ -418,7 +418,7 @@ public partial class BoxBrowserViewModel : ObservableObject, IBoxPager
         return RunMutationAsync(session => operation(legalizer, session), slot, changeDescription: description, action: action);
     }
 
-    /// <summary>Runs any slot mutation then commits it through the safe write path (validate → backup → atomic write).
+    /// <summary>Runs any slot mutation then commits it through the safe write path (validate → backup → write → verify).
     /// Hardcore mode is enforced here, at the one funnel every save write passes through:
     /// a refused <paramref name="action"/> skips the operation entirely - so nothing is
     /// even staged in the live session - and shows the reason instead of writing.</summary>
@@ -859,6 +859,7 @@ public partial class BoxBrowserViewModel : ObservableObject, IBoxPager
         }
         catch (Exception error)
         {
+            DiscardPartialEdits();
             AppLog.Error("edit", "Move aborted", error);
             Status = $"Move aborted: {error.Message}";
         }

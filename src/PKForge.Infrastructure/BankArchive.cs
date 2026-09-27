@@ -35,12 +35,14 @@ public sealed record BankArchiveImportResult(int Imported, int SkippedDuplicates
 /// Bank archive export/import over a picked folder: one .pkN file per mon (species number,
 /// nickname, short id — unique even for clones) plus manifest.json. Import merges into the
 /// bank, skipping exact byte copies (SHA-256) of mons already stored or already imported
-/// this batch. Loose .pk files import with or without a manifest.
+/// this batch. A manifest limits import to its verified members; without one, recognized
+/// loose .pk files are imported directly.
 /// </summary>
 public static class BankArchive
 {
     public const string ManifestFileName = "manifest.json";
     public const int CurrentSchemaVersion = 1;
+    private const string AppName = "PKForge";
 
     /// <summary>camelCase on purpose: the manifest is read outside the app too.</summary>
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
@@ -53,27 +55,46 @@ public static class BankArchive
         CancellationToken cancellationToken = default)
     {
         var list = entries ?? bank.GetAll();
+        var payloads = new (string Name, byte[] Bytes)[list.Count];
         var manifestEntries = new BankArchiveEntry[list.Count];
+        var names = new HashSet<string>(StringComparer.Ordinal);
         for (var i = 0; i < list.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var entry = list[i];
             var bytes = bank.GetData(entry.Id);
             var name = FileNameFor(entry);
-            await files.WriteFileAsync(treeId, name, bytes, cancellationToken).ConfigureAwait(false);
+            if (!names.Add(name))
+                throw new InvalidDataException($"The export contains the file name '{name}' more than once.");
+            payloads[i] = (name, bytes);
             manifestEntries[i] = new BankArchiveEntry(
                 name, entry.Info.Species, entry.Info.Nickname, entry.Info.Shiny,
                 entry.Info.Generation, entry.Box, entry.Slot, Sha256Hex(bytes));
         }
-        var manifest = new BankArchiveManifest("PKForge", CurrentSchemaVersion, DateTimeOffset.UtcNow, manifestEntries);
+
+        // Invalidate any previous manifest first. If the export is interrupted, a later
+        // import will stop instead of treating a mixture of old and new files as valid.
+        await files.WriteFileAsync(
+            treeId,
+            ManifestFileName,
+            Encoding.UTF8.GetBytes($"{{\"app\":\"{AppName}\",\"schemaVersion\":{CurrentSchemaVersion},\"exportIncomplete\":true}}"),
+            cancellationToken).ConfigureAwait(false);
+
+        foreach (var payload in payloads)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await files.WriteFileAsync(treeId, payload.Name, payload.Bytes, cancellationToken).ConfigureAwait(false);
+        }
+        var manifest = new BankArchiveManifest(AppName, CurrentSchemaVersion, DateTimeOffset.UtcNow, manifestEntries);
         var json = JsonSerializer.Serialize(manifest, Json);
         await files.WriteFileAsync(treeId, ManifestFileName, Encoding.UTF8.GetBytes(json), cancellationToken).ConfigureAwait(false);
         return list.Count;
     }
 
     /// <summary>
-    /// Merge-imports every recognized .pk file in the folder. <paramref name="describe"/> is
-    /// the engine's loose-entity probe (passed as a delegate so the archive stays engine-free).
+    /// Imports the verified manifest members, or every recognized .pk file when the folder has
+    /// no manifest. <paramref name="describe"/> is the engine's loose-entity probe (passed as a
+    /// delegate so the archive stays engine-free).
     /// </summary>
     public static async Task<BankArchiveImportResult> ImportAsync(
         IBankService bank,
@@ -83,9 +104,17 @@ public static class BankArchive
         Action<int, int>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        var candidates = (await files.ListFilesAsync(treeId, cancellationToken).ConfigureAwait(false))
-            .Where(f => IsPkFileName(f.DisplayName))
+        var folderFiles = await files.ListFilesAsync(treeId, cancellationToken).ConfigureAwait(false);
+        var manifests = folderFiles
+            .Where(f => f.DisplayName.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
             .ToArray();
+        if (manifests.Length > 1)
+            throw new InvalidDataException("The archive contains more than one manifest.json file.");
+
+        var candidates = manifests.Length == 1
+            ? await ReadManifestCandidatesAsync(files, folderFiles, manifests[0], cancellationToken).ConfigureAwait(false)
+            : await ReadLooseCandidatesAsync(files, folderFiles, cancellationToken).ConfigureAwait(false);
+
         var known = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entry in bank.GetAll())
         {
@@ -100,23 +129,111 @@ public static class BankArchive
         {
             cancellationToken.ThrowIfCancellationRequested();
             progress?.Invoke(i, candidates.Length);
-            var bytes = (await files.ReadFileAsync(candidates[i].DocumentId, cancellationToken).ConfigureAwait(false)).ToArray();
-            if (describe(bytes, candidates[i].DisplayName) is not { } info)
+            var candidate = candidates[i];
+            if (describe(candidate.Bytes, candidate.Name) is not { } info)
             {
                 rejected++;
                 continue;
             }
-            if (!known.Add(Sha256Hex(bytes)))
+            if (!known.Add(Sha256Hex(candidate.Bytes)))
             {
                 skipped++;
                 continue;
             }
-            bank.Add(bytes, info);
+            bank.Add(candidate.Bytes, info);
             imported++;
         }
         progress?.Invoke(candidates.Length, candidates.Length);
         return new BankArchiveImportResult(imported, skipped, rejected);
     }
+
+    private static async Task<ArchiveCandidate[]> ReadLooseCandidatesAsync(
+        IFolderFileAccess files,
+        IReadOnlyList<PickedDocument> folderFiles,
+        CancellationToken cancellationToken)
+    {
+        var documents = folderFiles.Where(f => IsPkFileName(f.DisplayName)).ToArray();
+        var candidates = new ArchiveCandidate[documents.Length];
+        for (var i = 0; i < documents.Length; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var bytes = await files.ReadFileAsync(documents[i].DocumentId, cancellationToken).ConfigureAwait(false);
+            candidates[i] = new ArchiveCandidate(documents[i].DisplayName, bytes.ToArray());
+        }
+        return candidates;
+    }
+
+    private static async Task<ArchiveCandidate[]> ReadManifestCandidatesAsync(
+        IFolderFileAccess files,
+        IReadOnlyList<PickedDocument> folderFiles,
+        PickedDocument manifestDocument,
+        CancellationToken cancellationToken)
+    {
+        BankArchiveManifest manifest;
+        try
+        {
+            var manifestBytes = await files.ReadFileAsync(manifestDocument.DocumentId, cancellationToken).ConfigureAwait(false);
+            manifest = JsonSerializer.Deserialize<BankArchiveManifest>(manifestBytes.ToArray(), Json)
+                ?? throw new InvalidDataException("The archive manifest is empty.");
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidDataException("The archive manifest is not valid JSON.", ex);
+        }
+
+        if (!string.Equals(manifest.App, AppName, StringComparison.Ordinal)
+            || manifest.SchemaVersion != CurrentSchemaVersion
+            || manifest.ExportedUtc == default
+            || manifest.Entries is null)
+        {
+            throw new InvalidDataException("The archive manifest is incomplete or uses an unsupported schema.");
+        }
+
+        var entriesByName = new Dictionary<string, BankArchiveEntry>(StringComparer.Ordinal);
+        foreach (var entry in manifest.Entries)
+        {
+            if (entry is null)
+                throw new InvalidDataException("The archive manifest contains an empty entry.");
+            if (!IsSafeArchiveFileName(entry.File) || !IsPkFileName(entry.File))
+                throw new InvalidDataException($"The archive manifest contains an unsafe or unsupported file name: '{entry.File}'.");
+            if (!IsSha256(entry.Sha256))
+                throw new InvalidDataException($"The archive manifest contains an invalid checksum for '{entry.File}'.");
+            if (!entriesByName.TryAdd(entry.File, entry))
+                throw new InvalidDataException($"The archive manifest lists '{entry.File}' more than once.");
+        }
+
+        var documentsByName = folderFiles
+            .Where(f => !f.DisplayName.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+            .GroupBy(f => f.DisplayName, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        var candidates = new ArchiveCandidate[manifest.Entries.Count];
+        for (var i = 0; i < manifest.Entries.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var entry = manifest.Entries[i];
+            if (!documentsByName.TryGetValue(entry.File, out var matches) || matches.Length != 1)
+                throw new InvalidDataException($"The archive member '{entry.File}' is missing or ambiguous.");
+
+            var bytes = (await files.ReadFileAsync(matches[0].DocumentId, cancellationToken).ConfigureAwait(false)).ToArray();
+            if (!Sha256Hex(bytes).Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"The archive member '{entry.File}' does not match its checksum.");
+            candidates[i] = new ArchiveCandidate(entry.File, bytes);
+        }
+        return candidates;
+    }
+
+    private static bool IsSafeArchiveFileName(string? fileName) =>
+        !string.IsNullOrWhiteSpace(fileName)
+        && fileName is not "." and not ".."
+        && !fileName.Contains('/')
+        && !fileName.Contains('\\')
+        && !Path.IsPathRooted(fileName)
+        && Path.GetFileName(fileName).Equals(fileName, StringComparison.Ordinal);
+
+    private static bool IsSha256(string? value) =>
+        value?.Length == 64 && value.All(Uri.IsHexDigit);
+
+    private sealed record ArchiveCandidate(string Name, byte[] Bytes);
 
     /// <summary>File name for one entry: "025 - Sparky a1b2c3d4.pk7". The short id keeps
     /// clones and same-named siblings distinct; the generation picks the .pkN extension.</summary>

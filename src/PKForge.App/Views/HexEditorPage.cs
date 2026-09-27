@@ -25,7 +25,7 @@ namespace PKForge.App.Views;
 /// "N bytes changed" in the header, undo-all in Actions). Nothing touches the file
 /// until close, when the whole diff commits as ONE write through ISafeSaveWriter —
 /// engine validation, a restore point ("Byte manipulation: N bytes"), then the
-/// atomic write — followed by MarkWritten + reopen so romhack raw patches go live in
+/// verified write — followed by MarkWritten + reopen so romhack raw patches go live in
 /// every surface. Only byte VALUE changes are possible (no inserts or deletes), so
 /// the candidate can never resize the save.
 /// </summary>
@@ -474,6 +474,13 @@ public sealed class HexEditorPage : IPadHandler
             _edits.Clear();
             TearDown();
             _result.TrySetResult(true);
+        }
+        catch (Exception error) when (error is SaveWriteFailedException or SaveConflictException)
+        {
+            _viewModel.Disconnect();
+            _viewModel.Status = error.Message;
+            TearDown();
+            _result.TrySetResult(false);
         }
         catch (Exception error)
         {

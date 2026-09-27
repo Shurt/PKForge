@@ -21,20 +21,27 @@ public sealed class AndroidSafFileAccess : ISaveFileAccess
         return buffer.ToArray();
     }
 
-    public ValueTask WriteAtomicallyAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
+    public ValueTask WriteAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
     {
         var uri = Parse(documentId);
         cancellationToken.ThrowIfCancellationRequested();
 
-        // SAF providers do not expose a portable rename-and-swap primitive. The descriptor must support
-        // reliable truncate/write/flush; providers that reject this mode fail closed.
-        using var descriptor = Resolver.OpenFileDescriptor(uri, "rwt")
-            ?? throw new IOException($"The document provider does not support safe truncate/write access for {uri}.");
-        var output = new ParcelFileDescriptor.AutoCloseOutputStream(descriptor);
+        // SAF cannot portably rename-and-swap while preserving the document URI. Open
+        // without truncating, and reject non-seekable providers before changing bytes.
+        // SafeSaveWriter has already persisted a restore point and verifies this write.
+        using var descriptor = Resolver.OpenFileDescriptor(uri, "rw")
+            ?? throw new IOException($"The document provider could not open {uri} for writing.");
+        var fileDescriptor = descriptor.FileDescriptor
+            ?? throw new IOException("The document provider returned no file descriptor.");
+        Android.Systems.Os.Lseek(fileDescriptor, 0, Android.Systems.OsConstants.SeekSet);
         cancellationToken.ThrowIfCancellationRequested();
+        using var output = new ParcelFileDescriptor.AutoCloseOutputStream(descriptor);
         output.Write(bytes.ToArray());
         output.Flush();
-        output.Close();
+        // Do not honor cancellation after modifying the document. Finish the replacement
+        // and flush the descriptor; the caller will read it back before accepting it.
+        Android.Systems.Os.Ftruncate(fileDescriptor, bytes.Length);
+        Android.Systems.Os.Fsync(fileDescriptor);
         return ValueTask.CompletedTask;
     }
 

@@ -84,6 +84,11 @@ public interface IBackupService
 {
     /// <summary>The change description shown in the restore point list (what this point undoes).</summary>
     ValueTask<BackupReceipt> CreateAsync(SaveSnapshot source, string? changeDescription = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Creates a restore point tied to the source document. Implementations that have
+    /// not adopted document-aware backups can keep using the older overload.</summary>
+    ValueTask<BackupReceipt> CreateAsync(SaveSnapshot source, string? changeDescription, CancellationToken cancellationToken, string? documentId) =>
+        CreateAsync(source, changeDescription, cancellationToken);
     ValueTask<IReadOnlyList<BackupInfo>> ListAsync(CancellationToken cancellationToken = default);
     ValueTask<ReadOnlyMemory<byte>> ReadAsync(string backupId, CancellationToken cancellationToken = default);
 }
@@ -91,7 +96,9 @@ public interface IBackupService
 public interface ISaveFileAccess
 {
     ValueTask<ReadOnlyMemory<byte>> ReadAsync(string documentId, CancellationToken cancellationToken = default);
-    ValueTask WriteAtomicallyAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default);
+    /// <summary>Replaces document bytes. Providers may write in place, so callers must
+    /// keep a durable backup and verify the resulting bytes before reporting success.</summary>
+    ValueTask WriteAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Selects a document through the host platform without exposing platform types.</summary>
@@ -188,7 +195,7 @@ public sealed class UnsafeSaveWriteException(string message, bool requiresConfir
 /// <summary>
 /// The Bank: the app's own cross-game vault. Entities are stored as raw decrypted bytes
 /// with provenance, never lossily normalized (brief §7). Unlimited boxes; the index is
-/// written atomically and survives everything.
+/// replaced atomically, with its previous revision retained for recovery.
 /// </summary>
 public interface IBankService
 {
@@ -282,6 +289,14 @@ public sealed record SlotSummary(int Box, int Slot, int? Species, string? Nickna
 
 public sealed record BackupReceipt(string BackupId, DateTimeOffset CreatedUtc, string Sha256);
 
+public enum BackupRestoreMatch
+{
+    Allowed,
+    LegacyNeedsOpenDocument,
+    DifferentDocument,
+    IncompatibleFormat,
+}
+
 public sealed record BackupInfo(
     string BackupId,
     DateTimeOffset CreatedUtc,
@@ -290,7 +305,33 @@ public sealed record BackupInfo(
     string Format,
     int Generation,
     long SizeBytes,
-    string? ChangeDescription = null);
+    string? ChangeDescription = null,
+    string? DocumentId = null)
+{
+    /// <summary>True for restore points created before source documents were recorded.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsLegacy => string.IsNullOrWhiteSpace(DocumentId);
+
+    public bool IsForDocument(string documentId) =>
+        !IsLegacy && string.Equals(DocumentId, documentId, StringComparison.Ordinal);
+
+    public bool HasCompatibleFormat(SaveSnapshot destination) =>
+        Generation == destination.Generation &&
+        string.Equals(Format, destination.Format, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Checks whether this restore point may target the open save. Null arguments mean
+    /// no save is open, in which case only a recorded document identity provides a safe target.</summary>
+    public BackupRestoreMatch MatchRestoreTarget(string? destinationDocumentId, SaveSnapshot? destination)
+    {
+        if (destination is null || string.IsNullOrWhiteSpace(destinationDocumentId))
+            return IsLegacy ? BackupRestoreMatch.LegacyNeedsOpenDocument : BackupRestoreMatch.Allowed;
+        if (!IsLegacy && !IsForDocument(destinationDocumentId))
+            return BackupRestoreMatch.DifferentDocument;
+        return HasCompatibleFormat(destination)
+            ? BackupRestoreMatch.Allowed
+            : BackupRestoreMatch.IncompatibleFormat;
+    }
+}
 
 public sealed record PickedDocument(string DocumentId, string DisplayName);
 

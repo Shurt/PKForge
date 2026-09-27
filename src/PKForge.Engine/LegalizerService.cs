@@ -8,7 +8,7 @@ namespace PKForge.Engine;
 /// <summary>
 /// Adapts the pinned Auto Legality Mod. Everything runs fully offline, in-process.
 /// A generated/repaired mon is placed into the session's slot; callers then serialize
-/// and write through the usual safe path (validate → backup → atomic write).
+/// and write through the usual safe path (validate → backup → write → verify).
 /// </summary>
 public sealed class LegalizerService : ILegalizerService
 {

@@ -17,10 +17,13 @@ public sealed class BankArchiveTests : IDisposable
     private sealed class MemoryFolder : IFolderFileAccess
     {
         private readonly List<(string Id, string Name, byte[] Bytes)> _files = [];
+        private int? _writesUntilFailure;
 
         public IReadOnlyList<string> Names => _files.Select(f => f.Name).ToArray();
 
         public void Add(string name, byte[] bytes) => _files.Add(($"mem://{_files.Count}", name, bytes));
+
+        public void FailAfterSuccessfulWrites(int count) => _writesUntilFailure = count;
 
         public byte[] ReadByName(string name) => _files.First(f => f.Name == name).Bytes;
 
@@ -39,6 +42,11 @@ public sealed class BankArchiveTests : IDisposable
 
         public ValueTask WriteFileAsync(string treeId, string fileName, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
         {
+            if (_writesUntilFailure == 0)
+                throw new IOException("Simulated interrupted export.");
+            if (_writesUntilFailure is not null)
+                _writesUntilFailure--;
+
             var existing = _files.FindIndex(f => f.Name == fileName);
             if (existing >= 0) _files[existing] = (_files[existing].Id, fileName, bytes.ToArray());
             else _files.Add(($"mem://{_files.Count}", fileName, bytes.ToArray()));
@@ -127,6 +135,83 @@ public sealed class BankArchiveTests : IDisposable
         Assert.Equal(1, summary.Rejected);
         Assert.Equal(2, bank.GetAll().Count);
         Assert.Equal((4, 4), reports[^1]); // the scan ends on a complete report
+    }
+
+    [Fact]
+    public async Task ImportWithManifestIgnoresStalePkFilesFromEarlierExport()
+    {
+        var source = new FileBankService(Path.Combine(_root, "source"));
+        var current = source.Add([1, 2, 3], Info(25));
+        var stale = source.Add([4, 5, 6], Info(133));
+        var folder = new MemoryFolder();
+        await BankArchive.ExportAsync(source, folder, "tree");
+        await BankArchive.ExportAsync(source, folder, "tree", [current]);
+
+        Assert.Contains(BankArchive.FileNameFor(stale), folder.Names);
+
+        var destination = new FileBankService(Path.Combine(_root, "destination"));
+        static BankEntryInfo? Describe(byte[] bytes, string name) => bytes.Length == 3 ? Info(25) : null;
+        var summary = await BankArchive.ImportAsync(destination, Describe, folder, "tree");
+
+        Assert.Equal(1, summary.Imported);
+        Assert.Single(destination.GetAll());
+        Assert.Equal([1, 2, 3], destination.GetData(destination.GetAll()[0].Id));
+    }
+
+    [Theory]
+    [InlineData("missing.pk7", "039058C6F2C0CB492C533B0A4D14EF77CC0F78ABCCCED5287D84A1A2011CFB81")]
+    [InlineData("../outside.pk7", "039058C6F2C0CB492C533B0A4D14EF77CC0F78ABCCCED5287D84A1A2011CFB81")]
+    [InlineData("current.pk7", "0000000000000000000000000000000000000000000000000000000000000000")]
+    public async Task ImportWithInvalidManifestFailsBeforeChangingBank(string fileName, string checksum)
+    {
+        var folder = new MemoryFolder();
+        folder.Add("current.pk7", [1, 2, 3]);
+        var manifest = new BankArchiveManifest(
+            "PKForge",
+            BankArchive.CurrentSchemaVersion,
+            DateTimeOffset.UtcNow,
+            [new BankArchiveEntry(fileName, 25, "Sparky", false, 7, 0, 0, checksum)]);
+        folder.Add(
+            BankArchive.ManifestFileName,
+            JsonSerializer.SerializeToUtf8Bytes(manifest, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+
+        var bank = new FileBankService(_root);
+        static BankEntryInfo? Describe(byte[] bytes, string name) => Info(25);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            BankArchive.ImportAsync(bank, Describe, folder, "tree"));
+        Assert.Empty(bank.GetAll());
+    }
+
+    [Fact]
+    public async Task InterruptedExportLeavesManifestThatCannotBeImported()
+    {
+        var source = new FileBankService(Path.Combine(_root, "source"));
+        source.Add([1, 2, 3], Info(25));
+        var folder = new MemoryFolder();
+        await BankArchive.ExportAsync(source, folder, "tree");
+        folder.FailAfterSuccessfulWrites(1); // incomplete marker succeeds, first member write fails
+
+        await Assert.ThrowsAsync<IOException>(() => BankArchive.ExportAsync(source, folder, "tree"));
+
+        var bank = new FileBankService(Path.Combine(_root, "destination"));
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            BankArchive.ImportAsync(bank, (_, _) => Info(25), folder, "tree"));
+        Assert.Empty(bank.GetAll());
+    }
+
+    [Fact]
+    public async Task CorruptManifestDoesNotFallBackToLooseFileImport()
+    {
+        var folder = new MemoryFolder();
+        folder.Add(BankArchive.ManifestFileName, "{not-json"u8.ToArray());
+        folder.Add("current.pk7", [1, 2, 3]);
+        var bank = new FileBankService(_root);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            BankArchive.ImportAsync(bank, (_, _) => Info(25), folder, "tree"));
+        Assert.Empty(bank.GetAll());
     }
 
     [Fact]
