@@ -8,16 +8,16 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <ApplicationId>org.pkforge.app</ApplicationId>
-    <ApplicationTitle>PKForge</ApplicationTitle>
-    <ApplicationVersion>303</ApplicationVersion>
-    <ApplicationDisplayVersion>3.0.3</ApplicationDisplayVersion>
+    <ApplicationId>org.pkforge.shurt</ApplicationId>
+    <ApplicationTitle>PKForge Personal</ApplicationTitle>
+    <ApplicationVersion>1000</ApplicationVersion>
+    <ApplicationDisplayVersion>1.0.0</ApplicationDisplayVersion>
     <RuntimeIdentifiers>android-arm64</RuntimeIdentifiers>
   </PropertyGroup>
   <PropertyGroup Condition="'$(DiagnosticBuild)' == 'true'">
     <!-- Diagnostic builds install beside production and cannot overwrite its app-private data. -->
-    <ApplicationId>org.pkforge.app.debug</ApplicationId>
-    <ApplicationTitle>PKForge Diagnostics</ApplicationTitle>
+    <ApplicationId>org.pkforge.shurt.debug</ApplicationId>
+    <ApplicationTitle>PKForge Personal Diagnostics</ApplicationTitle>
     <DefineConstants>$(DefineConstants);DIAGNOSTIC</DefineConstants>
     <!-- Diagnostic APKs are sideloaded, not deployed by an IDE. Fast Deployment
          otherwise expects assemblies in an app-private override directory and

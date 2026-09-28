@@ -74,7 +74,7 @@ public static class AboutPopup
                 Row("Logo by", "@spritedmistery"),
                 Small("Engine PKHeX · chrome PKSM (GPL-3)"),
                 Small("Sprites © Nintendo · Creatures · Game Freak"),
-                Small("github.com/sofianeelhor/pkforge", UiTokens.MenuBlue),
+                Small("github.com/Shurt/PKForge", UiTokens.MenuBlue),
                 new HorizontalStackLayout { Spacing = 8, HorizontalOptions = LayoutOptions.End, Children = { close } },
             },
         };

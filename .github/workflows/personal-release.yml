@@ -1,0 +1,213 @@
+name: Personal release
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: personal-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      app_version: ${{ steps.version.outputs.app_version }}
+      version_code: ${{ steps.version.outputs.version_code }}
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
+    steps:
+      - name: Set release version
+        id: version
+        shell: bash
+        run: |
+          app_version="1.0.${GITHUB_RUN_NUMBER}"
+          version_code=$((1000 + GITHUB_RUN_NUMBER))
+          tag="v${app_version}"
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - name: Refuse an existing release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          tags=$(gh api --paginate --jq '.[].name' "repos/${GITHUB_REPOSITORY}/tags?per_page=100")
+          while IFS= read -r existing_tag; do
+            if [[ "$existing_tag" =~ ^v1\.0\.([0-9]+)$ ]] \
+              && (( 10#${BASH_REMATCH[1]} >= GITHUB_RUN_NUMBER )); then
+              echo "Tag $existing_tag is not older than $RELEASE_TAG. Start a new workflow run." >&2
+              exit 1
+            fi
+          done <<< "$tags"
+
+          if release_error=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" 2>&1); then
+            echo "Release ${RELEASE_TAG} already exists. Start a new workflow run for a new version." >&2
+            exit 1
+          elif [[ "$release_error" != *"HTTP 404"* ]]; then
+            echo "Could not confirm that release ${RELEASE_TAG} is unused: $release_error" >&2
+            exit 1
+          fi
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          submodules: recursive
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Install MAUI Android workload
+        run: dotnet workload install maui-android
+      - name: Restore
+        run: dotnet restore PKForge.sln
+      - name: Test
+        run: |
+          dotnet test tests/PKForge.Domain.Tests/PKForge.Domain.Tests.csproj --no-restore --configuration Release
+          dotnet test tests/PKForge.Engine.Tests/PKForge.Engine.Tests.csproj --no-restore --configuration Release
+      - name: Build and verify signed APK
+        id: apk
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PKFORGE_ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.PKFORGE_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.PKFORGE_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.PKFORGE_ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERT_SHA256: ${{ vars.PKFORGE_ANDROID_CERT_SHA256 }}
+          APP_VERSION: ${{ needs.prepare.outputs.app_version }}
+          VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD EXPECTED_CERT_SHA256; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required release setting $name is missing." >&2
+              exit 1
+            fi
+          done
+
+          umask 077
+          keystore="${RUNNER_TEMP}/pkforge-release.p12"
+          store_pass_file="${RUNNER_TEMP}/pkforge-store-password"
+          key_pass_file="${RUNNER_TEMP}/pkforge-key-password"
+          cleanup() {
+            rm -f -- "$keystore" "$store_pass_file" "$key_pass_file"
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          printf '%s' "$KEYSTORE_PASSWORD" > "$store_pass_file"
+          printf '%s' "$KEY_PASSWORD" > "$key_pass_file"
+          chmod 600 "$keystore" "$store_pass_file" "$key_pass_file"
+
+          publish_dir="${RUNNER_TEMP}/pkforge-publish"
+          dotnet publish src/PKForge.App/PKForge.App.csproj --no-restore \
+            --configuration Release \
+            --framework net10.0-android \
+            --output "$publish_dir" \
+            -p:RuntimeIdentifier=android-arm64 \
+            -p:ApplicationId=org.pkforge.shurt \
+            -p:ApplicationDisplayVersion="$APP_VERSION" \
+            -p:ApplicationVersion="$VERSION_CODE" \
+            -p:AndroidPackageFormats=apk \
+            -p:AndroidKeyStore=true \
+            -p:AndroidSigningKeyStore="$keystore" \
+            -p:AndroidSigningStorePass="file:$store_pass_file" \
+            -p:AndroidSigningKeyAlias="$KEY_ALIAS" \
+            -p:AndroidSigningKeyPass="file:$key_pass_file"
+
+          mapfile -t apks < <(find "$publish_dir" -maxdepth 1 -type f -name '*-Signed.apk')
+          if [[ ${#apks[@]} -ne 1 ]]; then
+            echo "Expected one signed release APK, found ${#apks[@]}." >&2
+            exit 1
+          fi
+
+          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          apksigner="$build_tools/apksigner"
+          aapt="$build_tools/aapt"
+          "$apksigner" verify --verbose --print-certs "${apks[0]}"
+
+          signer_count=$("$apksigner" verify --print-certs "${apks[0]}" | grep -c '^Signer #[0-9]\+ certificate SHA-256 digest:')
+          if [[ "$signer_count" -ne 1 ]]; then
+            echo "Expected one APK signer, found $signer_count." >&2
+            exit 1
+          fi
+          actual_cert=$("$apksigner" verify --print-certs "${apks[0]}" \
+            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+          expected_cert=$(printf '%s' "$EXPECTED_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+          if [[ "$actual_cert" != "$expected_cert" ]]; then
+            echo "APK certificate fingerprint does not match PKFORGE_ANDROID_CERT_SHA256." >&2
+            exit 1
+          fi
+
+          badging=$("$aapt" dump badging "${apks[0]}")
+          package_name=$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$badging")
+          version_code=$(sed -n "s/^package:.* versionCode='\([^']*\)'.*/\1/p" <<< "$badging")
+          version_name=$(sed -n "s/^package:.* versionName='\([^']*\)'.*/\1/p" <<< "$badging")
+          native_code=$(sed -n "s/^native-code: '\([^']*\)'$/\1/p" <<< "$badging")
+          [[ "$package_name" == "org.pkforge.shurt" ]] || { echo "Unexpected package: $package_name" >&2; exit 1; }
+          [[ "$version_code" == "$VERSION_CODE" ]] || { echo "Unexpected version code: $version_code" >&2; exit 1; }
+          [[ "$version_name" == "$APP_VERSION" ]] || { echo "Unexpected version name: $version_name" >&2; exit 1; }
+          [[ "$native_code" == "arm64-v8a" ]] || { echo "Unexpected native code: $native_code" >&2; exit 1; }
+
+          mkdir -p release
+          release_apk="release/PKForge-${RELEASE_TAG}-arm64.apk"
+          cp "${apks[0]}" "$release_apk"
+          (cd release && sha256sum "$(basename "$release_apk")") > "${release_apk}.sha256"
+          echo "path=$release_apk" >> "$GITHUB_OUTPUT"
+          echo "checksum=${release_apk}.sha256" >> "$GITHUB_OUTPUT"
+      - name: Upload verified release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-personal-release
+          path: |
+            ${{ steps.apk.outputs.path }}
+            ${{ steps.apk.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release files
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-personal-release
+          path: release
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          APP_VERSION: ${{ needs.prepare.outputs.app_version }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        shell: bash
+        run: |
+          mapfile -t apks < <(find release -maxdepth 1 -type f -name '*.apk')
+          mapfile -t checksums < <(find release -maxdepth 1 -type f -name '*.sha256')
+          if [[ ${#apks[@]} -ne 1 || ${#checksums[@]} -ne 1 ]]; then
+            echo "Expected one APK and one checksum file." >&2
+            exit 1
+          fi
+          (cd release && sha256sum --check "$(basename "${checksums[0]}")")
+          gh release create "$RELEASE_TAG" "${apks[0]}" "${checksums[0]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_COMMIT" \
+            --title "PKForge $APP_VERSION" \
+            --generate-notes
