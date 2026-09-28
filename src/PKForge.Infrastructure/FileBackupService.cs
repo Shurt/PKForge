@@ -6,15 +6,21 @@ namespace PKForge.Infrastructure;
 
 /// <summary>
 /// Durable backup store: raw save bytes plus a JSON metadata sidecar per version,
-/// under an app-private directory. Oldest versions beyond <see cref="_maxVersions"/> are pruned.
+/// under an app-private directory. Oldest versions beyond <see cref="_maxVersions"/> are pruned
+/// per source document. Legacy backups without a document id are retained.
 /// </summary>
 public sealed class FileBackupService(string rootDirectory, int maxVersions = 20) : IBackupService
 {
     private readonly string _root = rootDirectory;
-    private readonly int _maxVersions = maxVersions;
+    private readonly int _maxVersions = maxVersions > 0
+        ? maxVersions
+        : throw new ArgumentOutOfRangeException(nameof(maxVersions), "Backup retention must keep at least one version.");
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
     public async ValueTask<BackupReceipt> CreateAsync(SaveSnapshot source, string? changeDescription = null, CancellationToken cancellationToken = default)
+        => await CreateAsync(source, changeDescription, cancellationToken, documentId: null).ConfigureAwait(false);
+
+    public async ValueTask<BackupReceipt> CreateAsync(SaveSnapshot source, string? changeDescription, CancellationToken cancellationToken, string? documentId)
     {
         ArgumentNullException.ThrowIfNull(source);
         Directory.CreateDirectory(_root);
@@ -23,13 +29,20 @@ public sealed class FileBackupService(string rootDirectory, int maxVersions = 20
         var id = $"{createdUtc:yyyyMMddTHHmmssfffZ}-{Guid.NewGuid():N}";
         var bytes = source.OriginalBytes.ToArray();
         var sha = Convert.ToHexString(SHA256.HashData(bytes));
-        var info = new BackupInfo(id, createdUtc, sha, source.DisplayName, source.Format, source.Generation, bytes.LongLength, changeDescription);
+        var info = new BackupInfo(id, createdUtc, sha, source.DisplayName, source.Format, source.Generation,
+            bytes.LongLength, changeDescription, documentId);
 
         // Bytes first, sidecar last: a backup without a sidecar is ignored, never half-trusted.
-        await File.WriteAllBytesAsync(BytesPath(id), bytes, cancellationToken).ConfigureAwait(false);
-        await File.WriteAllTextAsync(SidecarPath(id), JsonSerializer.Serialize(info, JsonOptions), cancellationToken).ConfigureAwait(false);
+        // Flush both files before publishing the sidecar so a successful receipt means the
+        // restore point reached durable storage before the live save may be touched.
+        await WriteDurableAsync(BytesPath(id), bytes, cancellationToken).ConfigureAwait(false);
+        var sidecarTemp = SidecarPath(id) + ".tmp";
+        await WriteDurableAsync(sidecarTemp, JsonSerializer.SerializeToUtf8Bytes(info, JsonOptions), cancellationToken).ConfigureAwait(false);
+        File.Move(sidecarTemp, SidecarPath(id));
 
-        Prune();
+        // Retention is housekeeping after the new restore point exists. A locked or damaged
+        // old file must not make callers think this backup failed and write without it.
+        TryPrune(documentId, id);
         return new BackupReceipt(id, createdUtc, sha);
     }
 
@@ -65,13 +78,40 @@ public sealed class FileBackupService(string rootDirectory, int maxVersions = 20
             .ToList();
     }
 
-    private void Prune()
+    private void TryPrune(string? documentId, string preserveId)
     {
-        foreach (var stale in ReadAll().Skip(_maxVersions))
+        if (string.IsNullOrWhiteSpace(documentId)) return;
+
+        try
         {
-            File.Delete(BytesPath(stale.BackupId));
-            File.Delete(SidecarPath(stale.BackupId));
+            foreach (var stale in ReadAll()
+                         .Where(x => x.IsForDocument(documentId))
+                         .Where(x => x.BackupId != preserveId)
+                         .Skip(_maxVersions - 1))
+            {
+                // Hide the restore point first. If deleting its bytes then fails, only an
+                // ignored orphan remains instead of a listed restore point with no data.
+                File.Delete(SidecarPath(stale.BackupId));
+                File.Delete(BytesPath(stale.BackupId));
+            }
         }
+        catch (IOException)
+        {
+            // A later create retries retention. The new backup remains valid and listed.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Treat retention as best effort; never invalidate the backup just created.
+        }
+    }
+
+    private static async Task WriteDurableAsync(string path, ReadOnlyMemory<byte> contents, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+            bufferSize: 4096, FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await stream.WriteAsync(contents, cancellationToken).ConfigureAwait(false);
+        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        stream.Flush(flushToDisk: true);
     }
 
     private static BackupInfo? ReadSidecar(string path)

@@ -56,7 +56,7 @@ public sealed class SaveWriteSafetyTests
 
     private static (SafeSaveWriter Writer, MemoryAccess Access) Writer()
     {
-        var access = new MemoryAccess();
+        var access = new MemoryAccess { Bytes = SyntheticVanillaGen3() };
         return (new SafeSaveWriter(Engine, new NullBackups(), access), access);
     }
 
@@ -163,7 +163,7 @@ public sealed class SaveWriteSafetyTests
         session.ApplyEdit(0, 0, new EntityEdit(Nickname: "EDITED"));
         var candidate = session.Serialize();
         var identities = new FakeIdentities();
-        var access = new MemoryAccess();
+        var access = new MemoryAccess { Bytes = bytes.ToArray() };
         var writer = new SafeSaveWriter(Engine, new NullBackups(), access, identities);
         var scope = WriteScope.Only(new SlotRef(0, 0));
 
@@ -296,7 +296,7 @@ public sealed class SaveWriteSafetyTests
         try
         {
             var identities = new JsonSaveIdentityStore(path);
-            var access = new MemoryAccess();
+            var access = new MemoryAccess { Bytes = bytes.ToArray() };
             var writer = new SafeSaveWriter(Engine, new NullBackups(), access, identities);
 
             var refusal = await Assert.ThrowsAsync<UnsafeSaveWriteException>(() => writer.WriteAsync("doc", Snap(bytes), candidate).AsTask());
@@ -383,6 +383,7 @@ public sealed class SaveWriteSafetyTests
         var broken = rr.ToArray();
         broken[14 * 0x1000 + 0xFF6] ^= 0x01; // ambiguous current state
         var (writer, access) = Writer();
+        access.Bytes = broken.ToArray();
         await writer.WriteScopedAsync("doc", Snap(broken), rr, WriteScope.Everything);
         Assert.Equal(1, access.Writes);
     }
@@ -473,11 +474,14 @@ public sealed class SaveWriteSafetyTests
 
     private sealed class MemoryAccess : ISaveFileAccess
     {
+        public byte[] Bytes { get; set; } = [];
         public int Writes { get; private set; }
-        public ValueTask<ReadOnlyMemory<byte>> ReadAsync(string documentId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-        public ValueTask WriteAtomicallyAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
+        public ValueTask<ReadOnlyMemory<byte>> ReadAsync(string documentId, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<ReadOnlyMemory<byte>>(Bytes.ToArray());
+        public ValueTask WriteAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
         {
             Writes++;
+            Bytes = bytes.ToArray();
             return ValueTask.CompletedTask;
         }
     }

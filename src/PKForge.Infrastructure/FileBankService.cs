@@ -4,8 +4,8 @@ using PKForge.Domain;
 namespace PKForge.Infrastructure;
 
 /// <summary>
-/// Durable bank store: one raw .bin per entity plus an atomically-written JSON index
-/// (tmp → rename, previous index kept as .bak). Boxes are 30 slots and auto-grow.
+/// Durable bank store: immutable raw .bin revisions plus an atomically-written JSON index
+/// (tmp → rename, previous index and its data kept for recovery). Boxes are 30 slots and auto-grow.
 /// </summary>
 public sealed class FileBankService : IBankService
 {
@@ -15,8 +15,10 @@ public sealed class FileBankService : IBankService
     private readonly string _root;
     private readonly Lock _gate = new();
     private List<BankEntry> _entries;
+    private Dictionary<Guid, string> _dataFiles;
     private int _boxCount;
     private int _migrationVersion;
+    private string? _lastGoodIndexJson;
     // Set when an index exists on disk but neither it nor its backup could be read: the bank
     // then stays read-only rather than overwrite the real index with an empty fallback.
     private readonly bool _indexUnreadable;
@@ -25,7 +27,7 @@ public sealed class FileBankService : IBankService
     {
         _root = rootDirectory;
         Directory.CreateDirectory(_root);
-        (_entries, _boxCount, _migrationVersion, _indexUnreadable) = LoadIndex();
+        (_entries, _dataFiles, _boxCount, _migrationVersion, _lastGoodIndexJson, _indexUnreadable) = LoadIndex();
     }
 
     public IReadOnlyList<BankEntry> GetAll()
@@ -47,12 +49,14 @@ public sealed class FileBankService : IBankService
             {
                 var (box, slot) = FirstEmpty();
                 var entry = new BankEntry(Guid.NewGuid(), box, slot, info, DateTimeOffset.UtcNow);
-                File.WriteAllBytes(DataPath(entry.Id), data);
+                var fileName = NewDataFileName(entry.Id);
+                WriteDataFile(fileName, data);
+                _dataFiles.Add(entry.Id, fileName);
                 _entries.Add(entry);
                 try { SaveIndex(); }
                 catch
                 {
-                    try { File.Delete(DataPath(entry.Id)); }
+                    try { File.Delete(Path.Combine(_root, fileName)); }
                     catch { /* an orphan .bin is harmless: the index never lists it */ }
                     throw;
                 }
@@ -102,13 +106,27 @@ public sealed class FileBankService : IBankService
             var index = _entries.FindIndex(e => e.Id == id);
             if (index < 0) throw new InvalidOperationException("Unknown bank entry.");
             EnsureWritable();
-            File.WriteAllBytes(DataPath(id), data);
-            Commit(() =>
+            var fileName = NewDataFileName(id);
+            var path = Path.Combine(_root, fileName);
+            try
             {
-                _entries[index] = _entries[index] with { Info = info };
-                SaveIndex();
-                return 0;
-            });
+                // A replacement gets a new immutable file. The index backup therefore keeps
+                // referring to the previous bytes if this index commit must be recovered.
+                WriteDataFile(fileName, data);
+                Commit(() =>
+                {
+                    _dataFiles[id] = fileName;
+                    _entries[index] = _entries[index] with { Info = info };
+                    SaveIndex();
+                    return 0;
+                });
+            }
+            catch
+            {
+                try { File.Delete(path); }
+                catch { /* an unreferenced revision is harmless and can be collected later */ }
+                throw;
+            }
         }
     }
 
@@ -122,12 +140,10 @@ public sealed class FileBankService : IBankService
             Commit(() =>
             {
                 _entries.RemoveAt(index);
+                _dataFiles.Remove(id);
                 SaveIndex();
                 return 0;
             });
-            // Bytes go only once the index no longer lists them.
-            try { File.Delete(DataPath(id)); }
-            catch { /* index is authoritative; orphan bytes are harmless */ }
         }
     }
 
@@ -144,14 +160,10 @@ public sealed class FileBankService : IBankService
             Commit(() =>
             {
                 _entries.RemoveAll(e => wanted.Contains(e.Id));
+                foreach (var id in releasing) _dataFiles.Remove(id);
                 SaveIndex();
                 return 0;
             });
-            foreach (var id in releasing)
-            {
-                try { File.Delete(DataPath(id)); }
-                catch { /* index is authoritative; orphan bytes are harmless */ }
-            }
             return releasing.Count;
         }
     }
@@ -311,22 +323,42 @@ public sealed class FileBankService : IBankService
         return (_boxCount - 1, 0);
     }
 
-    private string DataPath(Guid id) => Path.Combine(_root, id.ToString("N") + ".bin");
+    private string DataPath(Guid id) => Path.Combine(_root, DataFileName(id));
+    private string DataFileName(Guid id) =>
+        _dataFiles.TryGetValue(id, out var fileName) ? fileName : LegacyDataFileName(id);
+    private static string LegacyDataFileName(Guid id) => id.ToString("N") + ".bin";
+    private static string NewDataFileName(Guid id) =>
+        $"{id:N}.{Guid.NewGuid():N}.bin";
     private string IndexPath => Path.Combine(_root, "index.json");
 
-    // MigrationVersion is absent from older indexes and reads as 0; older app versions ignore it.
-    private sealed record IndexFile(int BoxCount, List<BankEntry> Entries, int MigrationVersion = 0);
+    private void WriteDataFile(string fileName, byte[] data)
+    {
+        using var stream = new FileStream(
+            Path.Combine(_root, fileName), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        stream.Write(data);
+        stream.Flush(flushToDisk: true);
+    }
+
+    // MigrationVersion and DataFiles are absent from older indexes. Missing data-file mappings
+    // keep using the original <entry-id>.bin layout.
+    private sealed record IndexFile(
+        int BoxCount,
+        List<BankEntry> Entries,
+        int MigrationVersion = 0,
+        Dictionary<Guid, string>? DataFiles = null);
 
     /// <summary>Runs one mutation of the in-memory index (the caller holds the gate); if it throws,
     /// typically because the index write failed, memory is put back to match the disk.</summary>
     private T Commit<T>(Func<T> mutate)
     {
         var entries = _entries.ToList();
+        var dataFiles = new Dictionary<Guid, string>(_dataFiles);
         var boxCount = _boxCount;
         try { return mutate(); }
         catch
         {
             _entries = entries;
+            _dataFiles = dataFiles;
             _boxCount = boxCount;
             throw;
         }
@@ -341,15 +373,34 @@ public sealed class FileBankService : IBankService
     private void SaveIndex()
     {
         EnsureWritable();
-        var json = JsonSerializer.Serialize(new IndexFile(_boxCount, _entries, _migrationVersion));
+        var json = JsonSerializer.Serialize(new IndexFile(_boxCount, _entries, _migrationVersion, _dataFiles));
         var tmp = IndexPath + ".tmp";
-        File.WriteAllText(tmp, json);
-        if (File.Exists(IndexPath))
-            File.Copy(IndexPath, IndexPath + ".bak", overwrite: true);
+        WriteDurableText(tmp, json);
+
+        // Back up the JSON that this instance successfully loaded or committed. Copying the
+        // current path could replace a good backup with a corrupt index we recovered from.
+        if (_lastGoodIndexJson is not null)
+        {
+            var backupTmp = IndexPath + ".bak.tmp";
+            WriteDurableText(backupTmp, _lastGoodIndexJson);
+            File.Move(backupTmp, IndexPath + ".bak", overwrite: true);
+        }
+
         File.Move(tmp, IndexPath, overwrite: true);
+        _lastGoodIndexJson = json;
+        TryDeleteUnreferencedDataFiles();
     }
 
-    private (List<BankEntry>, int, int, bool Unreadable) LoadIndex()
+    private static void WriteDurableText(string path, string text)
+    {
+        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+        using var writer = new StreamWriter(stream);
+        writer.Write(text);
+        writer.Flush();
+        stream.Flush(flushToDisk: true);
+    }
+
+    private (List<BankEntry>, Dictionary<Guid, string>, int, int, string? LastGoodJson, bool Unreadable) LoadIndex()
     {
         var anyIndex = false;
         foreach (var candidate in new[] { IndexPath, IndexPath + ".bak" })
@@ -358,9 +409,14 @@ public sealed class FileBankService : IBankService
             {
                 if (!File.Exists(candidate)) continue;
                 anyIndex = true;
-                var loaded = JsonSerializer.Deserialize<IndexFile>(File.ReadAllText(candidate));
+                var json = File.ReadAllText(candidate);
+                var loaded = JsonSerializer.Deserialize<IndexFile>(json);
                 if (loaded is not null)
-                    return (loaded.Entries ?? [], Math.Max(1, loaded.BoxCount), loaded.MigrationVersion, false);
+                {
+                    var entries = loaded.Entries ?? [];
+                    var dataFiles = ValidateDataFiles(loaded, entries);
+                    return (entries, dataFiles, Math.Max(1, loaded.BoxCount), loaded.MigrationVersion, json, false);
+                }
             }
             catch
             {
@@ -369,6 +425,61 @@ public sealed class FileBankService : IBankService
         }
         // A fresh bank opens with three inviting boxes; an index that exists but cannot be
         // read is never replaced by that empty fallback.
-        return ([], 3, 0, anyIndex);
+        return ([], [], 3, 0, null, anyIndex);
+    }
+
+    private Dictionary<Guid, string> ValidateDataFiles(IndexFile index, IReadOnlyList<BankEntry> entries)
+    {
+        var files = index.DataFiles ?? [];
+        var result = new Dictionary<Guid, string>();
+        foreach (var entry in entries)
+        {
+            if (!files.TryGetValue(entry.Id, out var fileName)) fileName = LegacyDataFileName(entry.Id);
+            if (!IsDataFileName(entry.Id, fileName) || !File.Exists(Path.Combine(_root, fileName)))
+                throw new InvalidDataException("The bank index refers to missing or invalid entity data.");
+            result.Add(entry.Id, fileName);
+        }
+        return result;
+    }
+
+    private static bool IsDataFileName(Guid id, string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) return false;
+        if (!string.Equals(fileName, Path.GetFileName(fileName), StringComparison.Ordinal)) return false;
+        if (string.Equals(fileName, LegacyDataFileName(id), StringComparison.OrdinalIgnoreCase)) return true;
+        var prefix = id.ToString("N") + ".";
+        if (!fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+            !fileName.EndsWith(".bin", StringComparison.OrdinalIgnoreCase)) return false;
+        return Guid.TryParseExact(fileName[prefix.Length..^4], "N", out _);
+    }
+
+    private void TryDeleteUnreferencedDataFiles()
+    {
+        try
+        {
+            var retained = _entries.Select(e => DataFileName(e.Id)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var backupPath = IndexPath + ".bak";
+            if (File.Exists(backupPath))
+            {
+                var backup = JsonSerializer.Deserialize<IndexFile>(File.ReadAllText(backupPath));
+                if (backup is null) return;
+                foreach (var entry in backup.Entries ?? [])
+                {
+                    var fileName = backup.DataFiles?.GetValueOrDefault(entry.Id) ?? LegacyDataFileName(entry.Id);
+                    if (!IsDataFileName(entry.Id, fileName)) return;
+                    retained.Add(fileName);
+                }
+            }
+
+            foreach (var path in Directory.EnumerateFiles(_root, "*.bin"))
+            {
+                if (!retained.Contains(Path.GetFileName(path))) File.Delete(path);
+            }
+        }
+        catch
+        {
+            // Cleanup is optional. Keeping an old or orphaned revision is safer than making
+            // an otherwise successful bank operation fail after its index was committed.
+        }
     }
 }

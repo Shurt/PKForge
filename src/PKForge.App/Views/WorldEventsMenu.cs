@@ -64,7 +64,7 @@ public static class WorldEventsMenu
     }
 
     /// <summary>The one write path for the world editors: Hardcore guard, restore point and
-    /// atomic write through <see cref="BoxBrowserViewModel.RunMutationAsync"/>. The edit returns
+    /// verified write through <see cref="BoxBrowserViewModel.RunMutationAsync"/>. The edit returns
     /// the confirmation line; an exception becomes a refused write with its message.</summary>
     internal static Task<bool> WriteAsync(BoxBrowserViewModel viewModel, Func<ISaveEngineSession, string> edit,
         SaveAction action = SaveAction.EditWorld) =>

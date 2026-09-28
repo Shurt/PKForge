@@ -124,6 +124,80 @@ public sealed class FileBankServiceTests : IDisposable
     }
 
     [Fact]
+    public void AFailedReplaceKeepsThePreviousInfoAndBytesAfterRestart()
+    {
+        var originalInfo = new BankEntryInfo(25, 0, false, "Pika", 30, 7, "Ultra Sun", "PK7");
+        var bank = new FileBankService(_root);
+        var entry = bank.Add([1, 2, 3], originalInfo);
+        var blocker = Path.Combine(_root, "index.json.tmp");
+        Directory.CreateDirectory(blocker);
+
+        Assert.ThrowsAny<Exception>(() =>
+            bank.Replace(entry.Id, [9, 8, 7], originalInfo with { Nickname = "Raichu", Species = 26 }));
+
+        Assert.Equal(originalInfo, bank.GetAll().Single().Info);
+        Assert.Equal([1, 2, 3], bank.GetData(entry.Id));
+        Directory.Delete(blocker);
+        var reloaded = new FileBankService(_root);
+        Assert.Equal(originalInfo, reloaded.GetAll().Single().Info);
+        Assert.Equal([1, 2, 3], reloaded.GetData(entry.Id));
+    }
+
+    [Fact]
+    public void BackupIndexStillReadsItsMatchingBytesAfterAReplace()
+    {
+        var originalInfo = new BankEntryInfo(25, 0, false, "Pika", 30, 7, "Ultra Sun", "PK7");
+        var bank = new FileBankService(_root);
+        var entry = bank.Add([1, 2, 3], originalInfo);
+        var replacementInfo = originalInfo with { Nickname = "Raichu", Species = 26 };
+        bank.Replace(entry.Id, [9, 8, 7], replacementInfo);
+        Assert.Equal(replacementInfo, bank.GetAll().Single().Info);
+        Assert.Equal([9, 8, 7], bank.GetData(entry.Id));
+
+        File.WriteAllText(Path.Combine(_root, "index.json"), "{ interrupted write");
+
+        var recovered = new FileBankService(_root);
+        Assert.Equal(originalInfo, recovered.GetAll().Single().Info);
+        Assert.Equal([1, 2, 3], recovered.GetData(entry.Id));
+    }
+
+    [Fact]
+    public void BackupIndexKeepsRemovedEntryBytesUntilTheNextCommit()
+    {
+        var bank = new FileBankService(_root);
+        var entry = bank.Add([1, 2, 3], new BankEntryInfo(25, 0, false, "Pika", 30, 7, "Ultra Sun", "PK7"));
+        bank.Remove(entry.Id);
+        Assert.Empty(bank.GetAll());
+
+        File.WriteAllText(Path.Combine(_root, "index.json"), "{ interrupted write");
+
+        var recovered = new FileBankService(_root);
+        Assert.Equal(entry, recovered.GetAll().Single());
+        Assert.Equal([1, 2, 3], recovered.GetData(entry.Id));
+    }
+
+    [Fact]
+    public void FailedCommitAfterBackupRecoveryKeepsTheGoodBackup()
+    {
+        var bank = new FileBankService(_root);
+        var first = bank.Add([1], new BankEntryInfo(25, 0, false, "Pika", 30, 7, "Ultra Sun", "PK7"));
+        bank.Add([2], new BankEntryInfo(26, 0, false, "Raichu", 30, 7, "Ultra Sun", "PK7"));
+        var index = Path.Combine(_root, "index.json");
+        File.WriteAllText(index, "{ corrupt current index");
+        var recovered = new FileBankService(_root);
+        Assert.Equal(first, recovered.GetAll().Single());
+
+        File.Delete(index);
+        Directory.CreateDirectory(index); // lets staging finish, but prevents replacing index.json
+        Assert.ThrowsAny<Exception>(recovered.AddBox);
+        Directory.Delete(index);
+
+        var restarted = new FileBankService(_root);
+        Assert.Equal(first, restarted.GetAll().Single());
+        Assert.Equal([1], restarted.GetData(first.Id));
+    }
+
+    [Fact]
     public void AnUnreadableIndexIsNeverOverwrittenByTheEmptyFallback()
     {
         Directory.CreateDirectory(_root);
@@ -136,6 +210,22 @@ public sealed class FileBankServiceTests : IDisposable
         Assert.Throws<InvalidOperationException>(bank.AddBox);
         Assert.Equal("{ not json", File.ReadAllText(index));
         Assert.False(File.Exists(index + ".bak"));
+    }
+
+    [Fact]
+    public void AnIndexWithMissingLegacyBytesIsUnreadable()
+    {
+        Directory.CreateDirectory(_root);
+        File.WriteAllText(Path.Combine(_root, "index.json"), """
+            {"BoxCount":3,"Entries":[{"Id":"01234567-89ab-cdef-0123-456789abcdef","Box":0,"Slot":0,
+            "Info":{"Species":1,"Form":0,"Shiny":false,"Nickname":"Bulbasaur","Level":5,
+            "Generation":1,"SourceName":"Red"},"AddedUtc":"2026-01-01T00:00:00+00:00"}]}
+            """);
+
+        var bank = new FileBankService(_root);
+
+        Assert.Empty(bank.GetAll());
+        Assert.Throws<InvalidOperationException>(bank.AddBox);
     }
 
     [Fact]
@@ -205,6 +295,7 @@ public sealed class FileBankServiceTests : IDisposable
               ]
             }
             """);
+        File.WriteAllBytes(Path.Combine(_root, id.ToString("N") + ".bin"), [4, 5, 6]);
 
         var bank = new FileBankService(_root);
 
@@ -220,6 +311,7 @@ public sealed class FileBankServiceTests : IDisposable
         Assert.Equal("Sparky", entry.Info.Nickname);
         Assert.Equal("Emerald", entry.Info.SourceName);
         Assert.Null(entry.Info.Format); // written before the field existed: optional, awaits migration
+        Assert.Equal([4, 5, 6], bank.GetData(id));
 
         // And the loaded bank keeps working: mutations rewrite the index in today's shape.
         bank.Add([9, 9, 9], new BankEntryInfo(133, 0, false, "Eevee", 30, 4, "HeartGold"));
@@ -253,6 +345,7 @@ public sealed class FileBankServiceTests : IDisposable
               ]
             }
             """);
+        File.WriteAllBytes(Path.Combine(_root, "0123456789abcdef0123456789abcdef.bin"), [1]);
 
         var bank = new FileBankService(_root);
 
@@ -292,6 +385,8 @@ public sealed class FileBankServiceTests : IDisposable
               ]
             }
             """);
+        foreach (var id in ids)
+            File.WriteAllBytes(Path.Combine(_root, id.ToString("N") + ".bin"), [1]);
 
         var bank = new FileBankService(_root);
         var placements = BankPlacement.Reorder(null,

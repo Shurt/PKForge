@@ -141,7 +141,16 @@ public sealed class BackupHistoryPage : ContentPage, IPadHandler
         change.SetBinding(Label.TextProperty, nameof(BackupInfo.ChangeDescription));
         change.SetBinding(Label.IsVisibleProperty, nameof(BackupInfo.ChangeDescription), converter: NotNullToVisible);
 
-        var text = new VerticalStackLayout { Spacing = 2, Children = { title, detail, change } };
+        var legacy = new Label
+        {
+            Text = "Legacy restore point · original file not recorded",
+            TextColor = UiTokens.InkSoft,
+            FontFamily = DsChrome.PixelFont,
+            FontSize = UiTokens.TextSmall,
+        };
+        legacy.SetBinding(Label.IsVisibleProperty, nameof(BackupInfo.IsLegacy));
+
+        var text = new VerticalStackLayout { Spacing = 2, Children = { title, detail, change, legacy } };
         var row = new Grid
         {
             ColumnSpacing = 10,
@@ -191,9 +200,9 @@ public sealed class BackupHistoryPage : ContentPage, IPadHandler
 
     private async Task ConfirmRestoreAsync(BackupInfo backup)
     {
-        if (!_viewModel.CanRestore)
+        if (_viewModel.RestoreRefusal(backup) is { } refusal)
         {
-            await PadMenu.ShowAsync(_hostGrid, "Restore", "Connect to a save first - restoring writes into the connected save.", "OK");
+            await PadMenu.ShowAsync(_hostGrid, "Restore unavailable", refusal, "OK");
             return;
         }
 
@@ -206,7 +215,8 @@ public sealed class BackupHistoryPage : ContentPage, IPadHandler
 
         var confirmed = await PadMenu.ConfirmAsync(_hostGrid,
             "Restore this point?",
-            $"Write the {backup.CreatedUtc:yyyy-MM-dd HH:mm} UTC restore point into the connected save? The current state is preserved as a new restore point first.",
+            _viewModel.RestoreRoute(backup) + "\n\nThe destination's current state is preserved as a new restore point first." +
+            _viewModel.LegacyRestoreWarning(backup),
             "Restore");
         if (confirmed)
             await _viewModel.RestoreAsync(backup);
@@ -224,16 +234,18 @@ public sealed class BackupHistoryPage : ContentPage, IPadHandler
         var check = await _viewModel.CheckResurrectionAsync(backup);
         if (check is { IsSafe: true })
             return await PadMenu.ConfirmAsync(_hostGrid, "Restore this point?",
-                $"Write the {backup.CreatedUtc:yyyy-MM-dd HH:mm} UTC restore point into the connected save? " +
-                "No Pokémon that has left this save since then would come back. The current state is preserved as a new restore point first.",
+                _viewModel.RestoreRoute(backup) + "\n\n" +
+                "No Pokémon that has left this save since then would come back. The destination's current state is preserved as a new restore point first." +
+                _viewModel.LegacyRestoreWarning(backup),
                 "Restore");
 
         string message;
         if (check is null)
         {
-            message = $"{HardcoreMode.Marker}: this restore point could not be compared with the current save. " +
+            message = _viewModel.RestoreRoute(backup) + $"\n\n{HardcoreMode.Marker}: this restore point could not be compared with the current save. " +
                 "If any Pokémon was moved to the Bank or sent to another game after it was taken, restoring brings it back here " +
-                "and it would then exist twice - a duplication Hardcore mode does not allow.";
+                "and it would then exist twice - a duplication Hardcore mode does not allow." +
+                _viewModel.LegacyRestoreWarning(backup);
         }
         else
         {
@@ -242,10 +254,11 @@ public sealed class BackupHistoryPage : ContentPage, IPadHandler
             var where = new List<string>();
             if (check.InBank > 0) where.Add($"{check.InBank} now in the Bank");
             if (check.Elsewhere > 0) where.Add($"{check.Elsewhere} sent to another game or released");
-            message = $"{HardcoreMode.Marker}: restoring would bring back {check.Reappearing.Count} Pokémon that left this save " +
+            message = _viewModel.RestoreRoute(backup) + $"\n\n{HardcoreMode.Marker}: restoring would bring back {check.Reappearing.Count} Pokémon that left this save " +
                 $"after this point ({string.Join(", ", where)}): {names}. " +
                 "Any that still exist in the Bank or another game would then exist twice - a duplication Hardcore mode does not allow. " +
-                "Release or withdraw those copies yourself if you restore.";
+                "Release or withdraw those copies yourself if you restore." +
+                _viewModel.LegacyRestoreWarning(backup);
         }
 
         var choice = await PadMenu.ShowAsync(_hostGrid, "Duplication risk", message, Cancel, Anyway);

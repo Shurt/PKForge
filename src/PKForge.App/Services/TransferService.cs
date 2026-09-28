@@ -19,7 +19,7 @@ public sealed record TransferPreviewOutcome(
 /// The target save is opened as a throwaway engine session, the entity is converted to
 /// its format by the engine (Gen 1 to Gen 9 either way, downgrades included with
 /// warnings), and the write goes through the
-/// same validate, backup, atomic-write pipeline as every other mutation.
+/// same validate, backup, write-and-verify pipeline as every other mutation.
 /// </summary>
 public sealed class TransferService(
     ISaveEngine engine, ISafeSaveWriter writer, ISaveFileAccess access, ISaveSessionService sessions,

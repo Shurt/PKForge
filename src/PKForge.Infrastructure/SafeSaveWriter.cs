@@ -8,10 +8,14 @@ public sealed class SafeSaveWriter(
     ISaveEngine engine,
     IBackupService backups,
     ISaveFileAccess access,
-    ISaveIdentityStore? identities = null) : ISafeSaveWriter
+    ISaveIdentityStore? identities = null,
+    ISaveSessionService? sessions = null) : ISafeSaveWriter
 {
     private readonly HashSet<string> _confirmedLayoutRisk = new(StringComparer.Ordinal);
     private readonly Lock _gate = new();
+    // Serialize app writes, including the baseline checks and backup. External emulators
+    // cannot participate in this lock, so we also check the document immediately before writing.
+    private readonly SemaphoreSlim _writes = new(1, 1);
 
     // The layout verdict depends only on the file's bytes, and analysing it re-parses and
     // round-trips the whole save; it is kept per document for the exact bytes it judged.
@@ -112,6 +116,20 @@ public sealed class SafeSaveWriter(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(documentId);
         ArgumentNullException.ThrowIfNull(original);
+        original = original with { OriginalBytes = original.OriginalBytes.ToArray() };
+        candidate = candidate.ToArray();
+        await _writes.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await WriteLockedAsync(documentId, original, candidate, scope, changeDescription, cancellationToken).ConfigureAwait(false);
+        }
+        finally { _writes.Release(); }
+    }
+
+    private async ValueTask<SaveWriteReceipt> WriteLockedAsync(
+        string documentId, SaveSnapshot original, ReadOnlyMemory<byte> candidate,
+        WriteScope? scope, string? changeDescription, CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
 
         // An unchanged candidate means the mutation produced identical bytes: writing the
@@ -139,9 +157,26 @@ public sealed class SafeSaveWriter(
                 throw new UnsafeSaveWriteException($"Write refused: {unsafeDiff} The original was not touched.");
         }
 
-        var backup = await backups.CreateAsync(original, changeDescription, cancellationToken).ConfigureAwait(false);
+        await CheckCurrentAsync(documentId, original.OriginalBytes, cancellationToken).ConfigureAwait(false);
+        var backup = await backups.CreateAsync(original, changeDescription, cancellationToken, documentId).ConfigureAwait(false);
+        // A backup can take time. Never replace a save that changed while it was being made.
+        await CheckCurrentAsync(documentId, original.OriginalBytes, cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
-        await access.WriteAtomicallyAsync(documentId, candidate, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // Once writing starts, complete and verify it even if the caller cancels.
+            // SAF cannot portably swap files atomically; the durable restore point is
+            // the recovery path for provider failures or process death during the write.
+            await access.WriteAsync(documentId, candidate, CancellationToken.None).ConfigureAwait(false);
+            var written = await access.ReadAsync(documentId, CancellationToken.None).ConfigureAwait(false);
+            if (!written.Span.SequenceEqual(candidate.Span))
+                throw new IOException("The save read back from storage did not match the requested bytes.");
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            CloseStaleSession(documentId);
+            throw new SaveWriteFailedException(backup.BackupId, error);
+        }
         // A write that passed the checks keeps the file's layout, so the candidate inherits
         // the verdict and the next write skips the whole-file layout analysis.
         lock (_gate)
@@ -155,5 +190,21 @@ public sealed class SafeSaveWriter(
             Convert.ToHexString(SHA256.HashData(original.OriginalBytes.Span)),
             Convert.ToHexString(SHA256.HashData(candidate.Span)),
             DateTimeOffset.UtcNow);
+    }
+
+    private async ValueTask CheckCurrentAsync(string documentId, ReadOnlyMemory<byte> expected, CancellationToken cancellationToken)
+    {
+        var current = await access.ReadAsync(documentId, cancellationToken).ConfigureAwait(false);
+        if (!current.Span.SequenceEqual(expected.Span))
+        {
+            CloseStaleSession(documentId);
+            throw new SaveConflictException();
+        }
+    }
+
+    private void CloseStaleSession(string documentId)
+    {
+        if (sessions?.Current?.Document.DocumentId == documentId)
+            sessions.Close();
     }
 }

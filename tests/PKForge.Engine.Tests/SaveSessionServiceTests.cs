@@ -85,7 +85,7 @@ public sealed class SaveSessionServiceTests
     {
         public ValueTask<ReadOnlyMemory<byte>> ReadAsync(string documentId, CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<ReadOnlyMemory<byte>>(documentId == "good" ? bytes : new byte[100]);
-        public ValueTask WriteAtomicallyAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default) =>
+        public ValueTask WriteAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
     }
 
@@ -94,7 +94,7 @@ public sealed class SaveSessionServiceTests
         public ValueTask<ReadOnlyMemory<byte>> ReadAsync(string documentId, CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<ReadOnlyMemory<byte>>(bytes);
 
-        public ValueTask WriteAtomicallyAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default) =>
+        public ValueTask WriteAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
     }
 }

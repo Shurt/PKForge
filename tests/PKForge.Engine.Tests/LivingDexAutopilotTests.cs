@@ -57,14 +57,19 @@ public sealed class LivingDexAutopilotTests : IDisposable
     {
         public Dictionary<string, byte[]> Files { get; } = new(StringComparer.Ordinal);
         public string? FailWritesTo { get; set; }
+        public bool FailAfterPartialWrite { get; set; }
         public List<string> Writes { get; } = [];
 
         public ValueTask<ReadOnlyMemory<byte>> ReadAsync(string documentId, CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<ReadOnlyMemory<byte>>(Files[documentId].ToArray());
 
-        public ValueTask WriteAtomicallyAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
+        public ValueTask WriteAsync(string documentId, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
         {
-            if (documentId == FailWritesTo) throw new IOException("The storage grant was revoked.");
+            if (documentId == FailWritesTo)
+            {
+                if (FailAfterPartialWrite) Files[documentId] = bytes[..16].ToArray();
+                throw new IOException("The storage provider failed.");
+            }
             Writes.Add(documentId);
             Files[documentId] = bytes.ToArray();
             return ValueTask.CompletedTask;
@@ -187,6 +192,24 @@ public sealed class LivingDexAutopilotTests : IDisposable
         Assert.Equal(world.SourceOriginal, world.Access.Files[SourceId]);
         Assert.Contains(world.Bank.GetAll(), e => e.Id == world.SquirtleId); // the Bank never let go
         Assert.All(result.Outcomes, o => Assert.NotEqual(LivingDexStepStatus.Done, o.Status));
+    }
+
+    [Fact]
+    public async Task PartialWriteKeepsRecoveryBackupAndDoesNotClaimFullRollback()
+    {
+        var world = Build();
+        var plan = Plan(world);
+        world.Access.FailWritesTo = SourceId;
+        world.Access.FailAfterPartialWrite = true;
+
+        var result = await world.Executor.ApplyAsync(plan, world.Saves);
+
+        Assert.False(result.Committed);
+        Assert.Equal(world.DestOriginal, world.Access.Files[DestId]);
+        Assert.Equal(16, world.Access.Files[SourceId].Length);
+        Assert.Contains("may need restoration", result.Summary);
+        Assert.DoesNotContain("Every save was put back", result.Summary);
+        Assert.Equal(world.SourceOriginal, (await world.Backups.ReadAsync(result.BackupIds[SourceId])).ToArray());
     }
 
     [Fact]

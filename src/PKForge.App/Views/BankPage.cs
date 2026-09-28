@@ -362,7 +362,7 @@ public sealed class BankPage : ContentPage, IPadPagingHandler
         var folder = await picker.PickFolderAsync();
         if (folder is null) return;
         var confirmed = await PadMenu.ConfirmAsync(_hostGrid, "Import from folder?",
-            $"Every recognized .pk file in {folder.DisplayName} joins the bank. Exact copies of mons already stored are skipped.",
+            $"Pokémon listed in the archive in {folder.DisplayName} join the bank. If there is no archive manifest, recognized .pk files are imported. Exact copies already stored are skipped.",
             "Import");
         if (!confirmed) return;
 

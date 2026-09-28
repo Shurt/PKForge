@@ -57,8 +57,11 @@ Not affiliated with Nintendo, Game Freak, or The Pokémon Company.
   a set between devices.
 - **Game-specific editors.** Grand Underground, Poké Beans, Fashion, and more, tailored
   to each game.
-- **Keep your saves safe.** Every write follows validate, backup, then atomic write, and
-  restore points capture every change exactly, so nothing is ever lost.
+- **Keep restore points.** Before each changed save is written, PKForge checks that the
+  file still matches the open session and keeps a backup. It verifies the bytes after
+  writing and retains 20 restore points per save. Close your emulator before editing:
+  Android document providers cannot guarantee atomic replacement or lock out another
+  app. Keep independent copies of important saves and export your Bank regularly.
 
 ## Screenshots
 
@@ -148,13 +151,35 @@ dotnet build src/PKForge.App/PKForge.App.csproj -f net10.0-android
 
 Version tags build and publish the APK from CI.
 
+### Storage recovery and personal builds
+
+Close the emulator before editing a save. If the file changes while it is open,
+PKForge refuses the write and disconnects it; reopen the latest save to continue.
+If a write fails or is interrupted, open **Restore points** from Home. New restore
+points record their source file and can recover it even when it no longer opens.
+Older restore points lack that identity and require an open, compatible save plus
+an explicit warning before restoring.
+
+Android's Storage Access Framework does not provide a portable atomic replacement
+or a lock shared with emulators. Writes are backed up, flushed and read back, but a
+process crash or simultaneous emulator write can still require manual recovery.
+Keep independent save copies. Export the Bank before switching to an older or
+unmodified build: the revised Bank index refers to versioned data files that older
+builds do not understand. Archive imports honor the latest manifest; an interrupted
+export must be rerun before it can be imported.
+
+Personal APKs need their own consistent signing key for updates. The built-in
+updater still uses upstream releases, whose signing key differs from your own;
+update personal builds manually. `-p:DiagnosticBuild=true` creates a separate
+test package and disables its built-in update check.
+
 ### Layout
 
 ```
 src/PKForge.Domain          contracts and DTOs, no engine or Android dependencies
 src/PKForge.Engine          adapters over pinned PKHeX.Core
 src/PKForge.AutoMod         compiles the Auto Legality Mod against our Core
-src/PKForge.Infrastructure  bank, backups, atomic save writer
+src/PKForge.Infrastructure  bank, backups, verified save writer
 src/PKForge.App             MAUI app, SkiaSharp UI, gamepad and second screen
 src/PKForge.Chrome          the design system: tokens and painters, pure Skia
 tools/ChromePreview         renders the design system off-device
