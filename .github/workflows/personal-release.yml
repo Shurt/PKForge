@@ -138,17 +138,20 @@ jobs:
           build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
           apksigner="$build_tools/apksigner"
           aapt="$build_tools/aapt"
-          "$apksigner" verify --verbose --print-certs "${apks[0]}"
+          signature_report=$("$apksigner" verify --verbose --print-certs "${apks[0]}")
+          printf '%s\n' "$signature_report"
 
-          signer_count=$("$apksigner" verify --print-certs "${apks[0]}" | grep -c '^Signer #[0-9]\+ certificate SHA-256 digest:')
-          if [[ "$signer_count" -ne 1 ]]; then
-            echo "Expected one APK signer, found $signer_count." >&2
+          signer_count=$(sed -nE 's/^Number of signers: ([0-9]+)[[:space:]]*$/\1/p' <<< "$signature_report")
+          if [[ "$signer_count" != "1" ]]; then
+            echo "Expected one APK signer, found '${signer_count:-unknown}'." >&2
             exit 1
           fi
-          actual_cert=$("$apksigner" verify --print-certs "${apks[0]}" \
-            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+          # Build-tools 36 prints "Signer #1"; 37 prints "V3.0 Signer:".
+          # Repeated certificates across schemes are allowed only if they agree.
+          actual_cert=$(sed -nE 's/^(Signer #[0-9]+|V[0-9]+(\.[0-9]+)? Signer:) certificate SHA-256 digest: ([[:xdigit:]]{64})[[:space:]]*$/\3/p' <<< "$signature_report" \
+            | tr '[:lower:]' '[:upper:]' | sort -u)
           expected_cert=$(printf '%s' "$EXPECTED_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
-          if [[ "$actual_cert" != "$expected_cert" ]]; then
+          if [[ ! "$actual_cert" =~ ^[0-9A-F]{64}$ || ! "$expected_cert" =~ ^[0-9A-F]{64}$ || "$actual_cert" != "$expected_cert" ]]; then
             echo "APK certificate fingerprint does not match PKFORGE_ANDROID_CERT_SHA256." >&2
             exit 1
           fi
