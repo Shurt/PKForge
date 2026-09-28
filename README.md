@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://discord.gg/bMtzZmTDfu"><img src="https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
-  <a href="https://github.com/sofianeelhor/PKForge/releases"><img src="https://img.shields.io/badge/Download-APK-2B4E95" alt="Download" /></a>
+  <a href="https://github.com/Shurt/PKForge/releases"><img src="https://img.shields.io/badge/Download-APK-2B4E95" alt="Download" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue" alt="License" /></a>
 </p>
 
@@ -126,7 +126,8 @@ You can also open a single save file directly.
 
 ## Installation
 
-Download the APK from [Releases](https://github.com/sofianeelhor/PKForge/releases) and
+This is Kyle's personal fork of [PKForge](https://github.com/sofianeelhor/PKForge).
+Download the APK from [this fork's Releases](https://github.com/Shurt/PKForge/releases) and
 allow installs from unknown sources. First run walks you through linking an emulator
 (RetroArch, melonDS, Azahar/Lime3DS, Citra MMJ, Eden) or opening a single save file.
 
@@ -149,7 +150,44 @@ dotnet test tests/PKForge.Engine.Tests/PKForge.Engine.Tests.csproj
 dotnet build src/PKForge.App/PKForge.App.csproj -f net10.0-android
 ```
 
-Version tags build and publish the APK from CI.
+Pull requests and pushes to `main` run both test suites and build a diagnostic APK.
+These temporary CI APKs expire after three days and use disposable signing keys.
+They are separate from the permanent personal app and are not an update channel.
+
+### Personal releases and Obtainium
+
+Releases are manual: after merging a change, open **Actions > Personal release >
+Run workflow** and select `main`. Pushing a tag does not publish a release.
+The workflow tests the code, signs one ARM64 Release APK, verifies its certificate,
+and publishes it to this fork's GitHub Releases. It uses the exact commit selected
+when the workflow starts.
+
+Version names are `1.0.N`, where `N` is the release workflow's run number; Android
+version codes are `1000 + N`. Failed runs can leave gaps. Start a new workflow run
+for a new release; an existing release tag cannot be overwritten by rerunning it.
+Keep this numbering scheme when changing the workflow so installed versions can
+continue to update.
+
+Configure these repository **Actions secrets** before the first release:
+
+| Secret | Value |
+| --- | --- |
+| `PKFORGE_ANDROID_KEYSTORE_BASE64` | Base64-encoded personal PKCS12 keystore |
+| `PKFORGE_ANDROID_KEYSTORE_PASSWORD` | Keystore password |
+| `PKFORGE_ANDROID_KEY_ALIAS` | `pkforge` |
+| `PKFORGE_ANDROID_KEY_PASSWORD` | Key password, the same as the keystore password |
+
+Also set the repository **Actions variable** `PKFORGE_ANDROID_CERT_SHA256` to the
+certificate's SHA256 fingerprint. Keep an independent backup of the keystore and
+password; GitHub secrets cannot serve as a recoverable backup.
+
+In Obtainium, add `https://github.com/Shurt/PKForge` as the app source. Each release
+has one APK, so no architecture filter is needed. The permanent app is named
+**PKForge Personal** and uses package ID `org.pkforge.shurt`. Its built-in updater
+also checks this fork. It installs separately from upstream PKForge and the
+previous diagnostic APK; export/import Bank data when moving to it. App-private
+backups and settings do not transfer automatically. External save files are still
+shared when you select the same files.
 
 ### Storage recovery and personal builds
 
@@ -168,10 +206,9 @@ unmodified build: the revised Bank index refers to versioned data files that old
 builds do not understand. Archive imports honor the latest manifest; an interrupted
 export must be rerun before it can be imported.
 
-Personal APKs need their own consistent signing key for updates. The built-in
-updater still uses upstream releases, whose signing key differs from your own;
-update personal builds manually. `-p:DiagnosticBuild=true` creates a separate
-test package and disables its built-in update check.
+Personal APKs need the same permanent signing key for updates. Local builds using
+the debug key cannot replace signed personal releases. `-p:DiagnosticBuild=true`
+creates a separate test package and disables its built-in update check.
 
 ### Layout
 

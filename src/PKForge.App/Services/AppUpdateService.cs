@@ -14,7 +14,7 @@ namespace PKForge.App.Services;
 /// Auto-check failures stay silent; manual checks surface their error in the status bar.</summary>
 public sealed class AppUpdateService
 {
-    private const string LatestUrl = "https://api.github.com/repos/sofianeelhor/PKForge/releases/latest";
+    private const string LatestUrl = "https://api.github.com/repos/Shurt/PKForge/releases/latest";
     private const string SkippedVersionKey = "update_skipped_version";
     private static readonly HttpClient Http = new(new SocketsHttpHandler
     {
@@ -37,7 +37,7 @@ public sealed class AppUpdateService
         using var request = new HttpRequestMessage(HttpMethod.Get, LatestUrl);
         request.Headers.Accept.ParseAdd("application/vnd.github+json");
         request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
-        request.Headers.UserAgent.ParseAdd($"PKForge/{AppInfo.Current.VersionString} (+https://github.com/sofianeelhor/PKForge)");
+        request.Headers.UserAgent.ParseAdd($"PKForge/{AppInfo.Current.VersionString} (+https://github.com/Shurt/PKForge)");
 
         using var response = await Http.SendAsync(request, checkTimeout.Token).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -192,7 +192,7 @@ public sealed class AppUpdateService
 [Android.Content.BroadcastReceiver(Enabled = true, Exported = false)]
 public sealed class UpdateInstallReceiver : Android.Content.BroadcastReceiver
 {
-    public const string ActionName = "org.pkforge.app.UPDATE_INSTALL_RESULT";
+    public const string ActionName = "org.pkforge.shurt.UPDATE_INSTALL_RESULT";
     public const int RequestCode = 4701;
 
     public override void OnReceive(Android.Content.Context? context, Android.Content.Intent? intent)
