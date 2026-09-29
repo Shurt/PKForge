@@ -100,6 +100,39 @@ Not affiliated with Nintendo, Game Freak, or The Pokémon Company.
   <img src="docs/screenshots/encounters.png" alt="Encounter browser" width="49%" />
 </p>
 
+## Optional pokedex connection
+
+Open **Settings → Pokedex connection**, enable it, and choose **Sync now**. The default
+server is `https://pokedex.thren.dev/`, reachable over Kyle's LAN or Tailscale. A custom
+HTTPS URL can be configured. The connection is disabled by default and makes no requests
+until you sync; save editing and the Bank work without it.
+
+Sync sends collection metadata from the local Bank, open session and detected shelf saves (including hidden saves),
+including forms, shininess and storage positions. Save files and Pokémon binaries stay on
+the device. The server displays these observations separately from manually confirmed HOME
+ownership. Neither HOME checkboxes nor acquisition/transfer confirmations are changed.
+
+The cached HOME checklist, entry notes and transfer plan remain readable when offline.
+Failed or cancelled uploads keep their exact pending snapshot for **Retry pending sync**,
+including across app restarts. After retrying, sync once more for a fresh scan. Requests
+time out after 15 seconds and do not retry in the background. Source scans can be cancelled.
+Unreadable or omitted sources retain their previous server observations; complete sources
+replace their prior snapshot, including removing copies no longer present. Open-session
+observations may include unsaved edits. Eggs are excluded from recognized entities.
+
+The server requires the companion integration from
+[pokedex issue #24](https://github.com/Home-Lab-Org/pokedex/issues/24). Deploy that backend
+and frontend before enabling the connection. An older/unreachable server leaves the local
+cache and pending snapshot intact. The personal LAN/Tailnet deployment requires no login.
+Do not expose the service publicly without adding access control.
+
+Mapping v1 identifies supported forms conservatively. Unrecognized forms, uncertain legacy
+Bank formats and unsupported save layouts appear as unmatched observations rather than
+being counted as a different form. Changing the server URL or resetting the local connection
+starts a new device identity and clears its local cache/pending request; retained remote
+observations keep their timestamps. Check the server's **PKForge** tab for incomplete scans
+and the last observation time of each source.
+
 ## Supported games
 
 PKForge reads and edits saves from every mainline generation, plus the GameCube side
