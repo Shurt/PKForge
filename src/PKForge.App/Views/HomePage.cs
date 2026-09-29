@@ -589,6 +589,7 @@ public sealed class HomePage : ContentPage, IPadHandler
             new PadOption("Restore points", IconPath: "history"),
             new PadOption("About PKForge", IconPath: "info"),
             new PadOption("Check for update", IconPath: "update"),
+            new PadOption("Pokedex connection", IconPath: "link"),
             new PadOption("Music", IconPath: "music"),
             new PadOption("Misc", IconPath: "gears"),
             new PadOption("Quit PKForge", IconPath: "quit"),
@@ -603,6 +604,7 @@ public sealed class HomePage : ContentPage, IPadHandler
             case "Restore points": await PushAsync<BackupHistoryPage>(); break;
             case "About PKForge": await AboutPopup.ShowAsync(_hostGrid); break;
             case "Check for update": await CheckForUpdateAsync(automatic: false); break;
+            case "Pokedex connection": await PokedexConnectionPage.ShowAsync(_hostGrid); break;
             case "Music": await ShowMusicAsync(); break;
             case "Misc": await ShowMiscAsync(); break;
             case "Quit PKForge":
