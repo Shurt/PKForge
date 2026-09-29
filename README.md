@@ -35,6 +35,11 @@ Not affiliated with Nintendo, Game Freak, or The Pokémon Company.
   anything back out into any save whenever you need it.
 - **Track your collection.** The Living Dex tracker follows all 1025 Pokémon across
   every generation, including shiny variants, so you always know what you still need.
+  Select a species and choose **Find copies** to see its current save or Bank box and
+  slot, including party positions. Results follow the tracker's form and shiny view;
+  the normal view includes both normal and shiny copies. The finder rescans the local
+  Bank, open session and visible shelf saves, and reports unreadable saves. Select a
+  result for its trainer/file details. It is read-only and does not switch saves.
 - **Browse and inject events.** The full Mystery Gift database is bundled and works
   offline. Browse Wonder Cards from old distributions and inject them straight into
   your save.
