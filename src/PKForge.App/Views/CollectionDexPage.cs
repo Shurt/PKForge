@@ -18,6 +18,7 @@ namespace PKForge.App.Views;
 /// the open save. A missing species can jump straight into "How to get" to plan the
 /// catch. The forms view lists every collectible form (Unown letters, Vivillon patterns,
 /// regional forms...) of the species that have several, missing ones as silhouettes.
+/// Find copies lists the save and box/party slot of matching holdings.
 /// Read-only: nothing here writes a save or the bank.
 /// </summary>
 public sealed class CollectionDexPage : IPadPagingHandler
@@ -55,6 +56,9 @@ public sealed class CollectionDexPage : IPadPagingHandler
     private bool _formsDex;
     private bool _missingOnly;
     private bool _loaded;
+    private bool _closed;
+    private bool _findingCopies;
+    private LoadingOverlay? _activeScan;
     private int _page;
     private int _cursor;
 
@@ -138,82 +142,51 @@ public sealed class CollectionDexPage : IPadPagingHandler
 
         var loader = LoadingOverlay.Show(_host, "Counting your collection…",
             "Reading the bank and every game on your shelf.");
-        _ = Task.Run(async () =>
-        {
-            var collection = await CollectAsync(_session);
-            var catalog = LivingDexCatalogBuilder.Build();
-            var storable = _session is null ? null : LivingDexCatalogBuilder.StorableIn(_session);
+        _activeScan = loader;
+        _ = LoadAsync();
 
-            // National scope: the bank spans every generation, so the tracker always
-            // counts all nine; "this game" is only a view filter (RefreshView).
-            MainThread.BeginInvokeOnMainThread(() =>
+        async Task LoadAsync()
+        {
+            try
             {
-                Apply(collection);
+                var scan = await CollectionLocationScanner.ScanAsync(_session, loader.Cancellation.Token);
+                var catalog = await Task.Run(LivingDexCatalogBuilder.Build, loader.Cancellation.Token);
+                if (_closed) return;
+                Apply(scan.Locations);
                 _allIds.AddRange(Enumerable.Range(1, Math.Min(CollectionDex.MaxSpecies, _data.SpeciesNames.Count - 1))
                     .Where(id => _data.SpeciesNames[id].Length > 0));
                 _formIds.AddRange(_allIds.Where(id => catalog.Forms.ContainsKey(id))
                     .SelectMany(id => catalog.FormsOf(id).Select(form => Key(id, form))));
-                _storableHere = storable;
+                _storableHere = _session is null ? null : LivingDexCatalogBuilder.StorableIn(_session);
                 // Loaded first: RefreshView warms the visible page and fills the cursor line.
                 _loaded = true;
                 RefreshView();
-                loader.Close();
                 _router?.Push(this);
-            });
-        });
-    }
-
-    /// <summary>Gathers every mon the collection actually holds: bank entries, the
-    /// open save (live, including unsaved generated/imported mons), and every other
-    /// save on the shelf. Dex flags are ignored by design — a caught-then-released
-    /// species is not something you can rebuild a living dex from.</summary>
-    private static async Task<List<(int Species, int Form, bool Shiny)>> CollectAsync(ISaveEngineSession? open)
-    {
-        var collection = new List<(int Species, int Form, bool Shiny)>();
-        var services = IPlatformApplication.Current?.Services;
-        var bank = services?.GetService<IBankService>();
-        if (bank is not null)
-            foreach (var entry in bank.GetAll())
-                if (entry.Info.Species > 0) collection.Add((entry.Info.Species, entry.Info.Form, entry.Info.Shiny));
-        if (open is not null)
-            foreach (var slot in open.Snapshot.Slots)
-                if (slot.Species is > 0 && !slot.IsEgg) collection.Add((slot.Species.Value, slot.Form, slot.IsShiny));
-
-        // The other games on the shelf: mons still living in their cartridges count
-        // toward the national tracker even though they were never deposited.
-        var picker = services?.GetService<ViewModels.SavePickerViewModel>();
-        var access = services?.GetService<ISaveFileAccess>();
-        var engine = services?.GetService<ISaveEngine>();
-        var openId = services?.GetService<ISaveSessionService>()?.Current?.Document.DocumentId;
-        if (picker is not null && access is not null && engine is not null)
-            foreach (var save in picker.Saves)
-            {
-                if (save.DocumentId == openId) continue;
-                try
-                {
-                    var bytes = await access.ReadAsync(save.DocumentId);
-                    using var session = engine.OpenSession(bytes, save.EngineHint, save.Format);
-                    foreach (var slot in session.Snapshot.Slots)
-                        if (slot.Species is > 0 && !slot.IsEgg) collection.Add((slot.Species.Value, slot.Form, slot.IsShiny));
-                }
-                catch (Exception)
-                {
-                    // A save that no longer parses (revoked grant, mid-write file)
-                    // must not blank the whole tracker; skip it.
-                }
             }
-        return collection;
+            catch (OperationCanceledException) { Close(); }
+            catch (Exception error)
+            {
+                _viewModel.Status = $"Collection dex closed: {error.Message}";
+                Close();
+            }
+            finally
+            {
+                loader.Close();
+                if (ReferenceEquals(_activeScan, loader)) _activeScan = null;
+            }
+        }
     }
 
-    private void Apply(List<(int Species, int Form, bool Shiny)> collection)
+    private void Apply(IReadOnlyList<CollectionLocation> collection)
     {
         _progressData = CollectionDex.Compute(collection.Select(c => (c.Species, c.Shiny)), CollectionDex.MaxSpecies, _data.SpeciesNames);
         _owned.Clear();
         _shiny.Clear();
         _ownedForms.Clear();
         _shinyForms.Clear();
-        foreach (var (species, form, shiny) in collection)
+        foreach (var copy in collection)
         {
+            var (species, form, shiny) = (copy.Species, copy.Form, copy.Shiny);
             if (species < 1 || species >= _data.SpeciesNames.Count || _data.SpeciesNames[species].Length == 0) continue;
             _owned.Add(species);
             _ownedForms.Add(Key(species, form));
@@ -345,7 +318,8 @@ public sealed class CollectionDexPage : IPadPagingHandler
         _viewIds.Clear();
         _viewIds.AddRange(view);
         _page = Math.Clamp(_page, 0, PageCount - 1);
-        _cursor = Math.Clamp(_cursor, 0, Math.Max(0, Count - 1));
+        // A fresh scan can shrink the final page. Keep selection on a visible cell.
+        _cursor = Math.Clamp(_cursor, 0, Math.Max(0, Math.Min(PageSize, Count - _page * PageSize) - 1));
         RefreshChrome();
         RefreshCursorInfo();
         WarmVisible();
@@ -504,7 +478,7 @@ public sealed class CollectionDexPage : IPadPagingHandler
         var row = _cursor / Columns;
         col = Math.Clamp(col + dx, 0, Columns - 1);
         row = Math.Clamp(row + dy, 0, Rows - 1);
-        _cursor = Math.Clamp(row * Columns + col, 0, Count - 1);
+        _cursor = Math.Clamp(row * Columns + col, 0, Math.Min(PageSize, Count - _page * PageSize) - 1);
         RefreshCursorInfo();
         _canvas.InvalidateSurface();
     }
@@ -551,11 +525,13 @@ public sealed class CollectionDexPage : IPadPagingHandler
 
     private async Task ShowActionsAsync()
     {
-        if (!_loaded || Count == 0) return;
+        if (!_loaded || _findingCopies || Count == 0) return;
         var id = SpeciesOf(IdAt(_page, _cursor));
         var choice = await PadMenu.ShowAsync(_host, $"#{id:000} {CellName(IdAt(_page, _cursor))}", null,
+            new PadOption("Find copies", IconPath: "search"),
             new PadOption("How to get", IconPath: "map"),
             new PadOption("Close", IconPath: "close"));
+        if (choice == "Find copies") await FindCopiesAsync();
         if (choice == "How to get")
         {
             // Straight to the answer for THIS Pokémon: no species wizard, and it works
@@ -564,8 +540,41 @@ public sealed class CollectionDexPage : IPadPagingHandler
 
             // A catch may have added a species; recount before returning. National scope,
             // same as the initial count: a catch must never shrink the header to game scope.
-            Apply(await CollectAsync(_session));
+            Apply((await CollectionLocationScanner.ScanAsync(_session)).Locations);
             RefreshView();
+        }
+    }
+
+    private async Task FindCopiesAsync()
+    {
+        if (_findingCopies || _closed || Count == 0) return;
+        _findingCopies = true;
+        var key = IdAt(_page, _cursor);
+        var name = CellName(key);
+        var loader = LoadingOverlay.Show(_host, "Finding copies…", "Reading current storage locations.");
+        _activeScan = loader;
+        try
+        {
+            var scan = await CollectionLocationScanner.ScanAsync(_session, loader.Cancellation.Token);
+            if (_closed) return;
+            Apply(scan.Locations);
+            RefreshView();
+            var copies = CollectionLocations.Find(scan.Locations, SpeciesOf(key),
+                _formsDex ? FormOf(key) : null, _shinyDex);
+            loader.Close();
+            _activeScan = null;
+            await CollectionLocationsPage.ShowAsync(_host, name, copies, scan.UnreadableSources);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            _viewModel.Status = $"Could not find copies: {error.Message}";
+        }
+        finally
+        {
+            loader.Close();
+            if (ReferenceEquals(_activeScan, loader)) _activeScan = null;
+            _findingCopies = false;
         }
     }
 
@@ -582,7 +591,7 @@ public sealed class CollectionDexPage : IPadPagingHandler
         {
             _router?.Push(this);
         }
-        Apply(await CollectAsync(_session));
+        Apply((await CollectionLocationScanner.ScanAsync(_session)).Locations);
         RefreshView();
     }
 
@@ -597,6 +606,10 @@ public sealed class CollectionDexPage : IPadPagingHandler
 
     private void Close()
     {
+        _closed = true;
+        _activeScan?.Cancellation.Cancel();
+        _activeScan?.Close();
+        _activeScan = null;
         if (_router is not null) _router.Remove(this);
         _host.Remove(_overlay);
         _result.TrySetResult(true);
