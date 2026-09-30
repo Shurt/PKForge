@@ -83,6 +83,7 @@ public static class MauiProgram
         builder.Services.AddSingleton<SpritePackDownloader>();
         builder.Services.AddSingleton<AppUpdateService>();
         builder.Services.AddSingleton<PokedexConnectionService>();
+        builder.Services.AddSingleton<CheckpointConnectionService>();
         builder.Services.AddSingleton<TransferService>();
 #if ANDROID
         builder.Services.AddSingleton<ISaveFileAccess, AndroidSafFileAccess>();
