@@ -68,6 +68,25 @@ Not affiliated with Nintendo, Game Freak, or The Pokémon Company.
   Android document providers cannot guarantee atomic replacement or lock out another
   app. Keep independent copies of important saves and export your Bank regularly.
 
+## Send a save to a 3DS
+
+Digital Pokémon X/Y saves can be sent to Checkpoint 5.2.0 over the local network.
+In **Settings > 3DS connection**, save the IP address shown by Checkpoint. You can
+also enter or change it during a transfer; PKForge remembers it across restarts.
+
+1. Close the game on the 3DS and use Checkpoint to back up its current save.
+2. Open Checkpoint's **Receive** screen for the matching game.
+3. Open the save in PKForge and choose **Save data > Send to 3DS**.
+4. Choose **Send backup** and enter the four-digit PIN shown by Checkpoint.
+5. After Checkpoint confirms receipt, select the new `PKForge` backup on the 3DS
+   and choose **Restore**. Keep your original backup.
+
+Each upload gets a new backup name. PKForge does not restore the save automatically
+or modify the local source file during this transfer. The PIN is not remembered.
+If a transfer is interrupted, check Checkpoint's backup list before retrying;
+receipt may be uncertain. Other games and receiving saves into PKForge are not
+supported by this first version.
+
 ## Screenshots
 
 <p align="center">

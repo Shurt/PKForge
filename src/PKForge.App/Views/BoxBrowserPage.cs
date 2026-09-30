@@ -2350,6 +2350,7 @@ public sealed partial class BoxBrowserPage : ContentPage, IPadPagingHandler, IPa
             // Viewable in Hardcore mode; each world editor refuses writes itself.
             WorldEventsMenu.HasAny(session) ? new PadOption("World & events", IconPath: "map") : null,
             new PadOption("Export modified save", IconPath: "export"),
+            Engine.CheckpointSaveExport.IsSupported(session) ? new PadOption("Send to 3DS", IconPath: "link") : null,
             new PadOption("Restore points", IconPath: "history"),
             new PadOption("Close save", IconPath: "quit")).ToList();
         if (session.GetGrandUndergroundItems().Count != 0 && Guard.Allows(SaveAction.EditInventory))
@@ -2361,6 +2362,7 @@ public sealed partial class BoxBrowserPage : ContentPage, IPadPagingHandler, IPa
         {
             case "Trainer card": await ShowTrainerCardAsync(); return;
             case "Export modified save": await ExportModifiedSaveAsync(session); return;
+            case "Send to 3DS": await CheckpointTransferPage.SendAsync(_hostGrid, session); return;
             case "Close save": await Navigation.PopAsync(); return;
             case "Bag & items": await ShowBagAsync(); return;
             case "Grand Underground": await GrandUndergroundEditor.ShowAsync(_hostGrid, session, _viewModel); return;
