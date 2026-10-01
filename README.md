@@ -70,7 +70,8 @@ Not affiliated with Nintendo, Game Freak, or The Pokémon Company.
 
 ## Send a save to a 3DS
 
-Digital Pokémon X/Y saves can be sent to Checkpoint 5.2.0 over the local network.
+Digital Pokémon X/Y, Omega Ruby/Alpha Sapphire, Sun/Moon, and Ultra Sun/Ultra Moon
+saves can be sent to Checkpoint 5.2.0 over the local network.
 In **Settings > 3DS connection**, save the IP address shown by Checkpoint. You can
 also enter or change it during a transfer; PKForge remembers it across restarts.
 
@@ -84,8 +85,8 @@ also enter or change it during a transfer; PKForge remembers it across restarts.
 Each upload gets a new backup name. PKForge does not restore the save automatically
 or modify the local source file during this transfer. The PIN is not remembered.
 If a transfer is interrupted, check Checkpoint's backup list before retrying;
-receipt may be uncertain. Other games and receiving saves into PKForge are not
-supported by this first version.
+receipt may be uncertain. DS and Virtual Console transfers are planned for a later
+version. Switch transfers, demos, and receiving saves into PKForge are not supported.
 
 ## Screenshots
 
