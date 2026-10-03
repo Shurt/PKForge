@@ -235,7 +235,17 @@ public sealed record PokedexBankPlanTarget(
     [property: JsonPropertyName("title")] string Title,
     [property: JsonPropertyName("source")] string Source,
     [property: JsonPropertyName("gameProgress")] string GameProgress,
-    [property: JsonPropertyName("progress")] PokedexBankPlanProgress Progress);
+    [property: JsonPropertyName("progress")] PokedexBankPlanProgress Progress)
+{
+    // Older cached plans predate the curated Wonder Card references. A new sync fills these in.
+    [JsonPropertyName("wonderCards")]
+    public IReadOnlyList<PokedexWonderCardReference>? WonderCards { get; init; }
+}
+
+public sealed record PokedexWonderCardReference(
+    [property: JsonPropertyName("sourcePath")] string SourcePath,
+    [property: JsonPropertyName("games")] string Games,
+    [property: JsonPropertyName("cardId")] string CardId);
 
 public sealed record PokedexBankPlanProgress(
     [property: JsonPropertyName("acquired")] bool Acquired,
