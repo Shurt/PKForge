@@ -220,6 +220,7 @@ public sealed record WonderCardQuery
     public WonderCardKindFilter Kind { get; init; }
     public bool ShinyOnly { get; init; }
     public bool CompatibleOnly { get; init; }
+    public bool BankPlanOnly { get; init; }
     public WonderCardReceivedFilter Received { get; init; }
     public int? Year { get; init; }
     public int? Species { get; init; }
@@ -234,7 +235,7 @@ public sealed record WonderCardQuery
     public int ActiveFilterCount =>
         (Kind != WonderCardKindFilter.All ? 1 : 0) + (ShinyOnly ? 1 : 0) + (CompatibleOnly ? 1 : 0)
         + (Received != WonderCardReceivedFilter.Any ? 1 : 0) + (Year is null ? 0 : 1) + (Species is null ? 0 : 1)
-        + (Language is null ? 0 : 1) + (Series is null ? 0 : 1);
+        + (Language is null ? 0 : 1) + (Series is null ? 0 : 1) + (BankPlanOnly ? 1 : 0);
 }
 
 public sealed record WonderCardGroup(string Title, int Start, int Count);
@@ -332,9 +333,15 @@ public static class WonderCardAlbum
             : WonderCardGrouping.Series,
     };
 
-    /// <summary>Answers a query: collapse, filter, sort, group.</summary>
-    public static WonderCardPage Query(IReadOnlyList<WonderCardEntry> entries, WonderCardQuery query, EventGiftSaveProfile? profile)
+    /// <summary>Answers a query: match exact plan references, collapse, filter, sort, group.</summary>
+    public static WonderCardPage Query(IReadOnlyList<WonderCardEntry> entries, WonderCardQuery query, EventGiftSaveProfile? profile,
+        PokedexBankPlan? bankPlan = null)
     {
+        var total = query.OnePerEvent ? entries.Select(e => e.VariantKey).Distinct().Count() : entries.Count;
+        // Match before collapsing so the preferred language or another IV variant cannot
+        // replace the exact distribution the plan calls for, including in the card sheet.
+        if (query.BankPlanOnly)
+            entries = entries.Where(e => BankPlanWonderCards.Matches(e.Gift, profile, bankPlan)).ToArray();
         IReadOnlyList<WonderCardEntry> pool = query.OnePerEvent
             ? CollapseVariants(entries, query.Language ?? (profile is null ? null : GiftLanguages.TagFor(profile.Language)))
             : entries;
@@ -346,7 +353,7 @@ public static class WonderCardAlbum
         string SeriesKey(WonderCardEntry e) => seriesCounts[e.Series] > 1 ? e.Series : OtherEvents;
         var sorted = Sort(matched, query.Sort, query.Grouping, SeriesKey);
         var groups = Group(sorted, query.Grouping, SeriesKey);
-        return new WonderCardPage(sorted, groups, pool.Count, sorted.Count(e => e.Received));
+        return new WonderCardPage(sorted, groups, total, sorted.Count(e => e.Received));
     }
 
     public static bool Matches(WonderCardEntry e, WonderCardQuery q, IReadOnlyList<string> tokens)

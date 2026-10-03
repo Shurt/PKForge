@@ -60,7 +60,8 @@ public static class EventGallery
         }
 
         var slot = targetSlot ?? viewModel.VisibleSlots.FirstOrDefault(s => s.Species is null)?.Slot ?? -1;
-        var context = new AlbumContext(host, viewModel, session, service, sprites, data, history, profile, slot, targetSlot is not null);
+        var bankPlan = services.GetService<PokedexConnectionService>()?.State.Cache?.BankPlan;
+        var context = new AlbumContext(host, viewModel, session, service, sprites, data, history, profile, slot, targetSlot is not null, bankPlan);
         var chosen = await GiftAlbum.ShowAsync(context, entries);
         if (chosen is null) return;
 
@@ -92,7 +93,7 @@ public static class EventGallery
     private sealed record AlbumContext(
         Grid Host, BoxBrowserViewModel ViewModel, ISaveEngineSession Session, IEventDatabaseService Service,
         ISpriteService Sprites, IGameDataService Data, InjectedGiftHistory History, EventGiftSaveProfile? Profile,
-        int TargetSlot, bool SlotChosen);
+        int TargetSlot, bool SlotChosen, PokedexBankPlan? BankPlan);
 
     // ── Shared painting ──────────────────────────────────────────────────────────
 
@@ -547,7 +548,7 @@ public static class EventGallery
 
         private void Requery(WonderCardEntry? keep)
         {
-            _page = WonderCardAlbum.Query(_all, _query, _ctx.Profile);
+            _page = WonderCardAlbum.Query(_all, _query, _ctx.Profile, _ctx.BankPlan);
             var at = keep is null ? -1 : IndexOfGift(keep.Gift);
             _index = Math.Max(0, at);
             RebuildLines();
@@ -651,7 +652,8 @@ public static class EventGallery
             yield return (q.Received switch { WonderCardReceivedFilter.NotReceived => "New only", WonderCardReceivedFilter.Received => "Received", _ => "Any status" },
                 q.Received != WonderCardReceivedFilter.Any,
                 () => Set(q with { Received = (WonderCardReceivedFilter)(((int)q.Received + 1) % 3) }));
-            var extra = (q.Year is null ? 0 : 1) + (q.Species is null ? 0 : 1) + (q.Language is null ? 0 : 1) + (q.Series is null ? 0 : 1);
+            var extra = (q.Year is null ? 0 : 1) + (q.Species is null ? 0 : 1) + (q.Language is null ? 0 : 1) + (q.Series is null ? 0 : 1)
+                + (q.BankPlanOnly ? 1 : 0);
             yield return (extra > 0 ? $"More · {extra}" : "More…", extra > 0, () => _ = ShowFilterMenuAsync());
             yield return ($"Sort: {SortLabel(q.Sort)}", false, CycleSort);
             yield return ($"Group: {GroupLabel(q.Grouping)}", false, CycleGrouping);
@@ -988,7 +990,10 @@ public static class EventGallery
                     var q = _query;
                     var options = new List<PadOption>();
                     if (_ctx.Profile is not null)
+                    {
                         options.Add(new PadOption(Check(q.CompatibleOnly) + "Fits this save", IconPath: "game"));
+                        options.Add(new PadOption(Check(q.BankPlanOnly) + "Bank Plan targets", IconPath: "bank"));
+                    }
                     options.Add(new PadOption($"Gifts: {q.Kind switch { WonderCardKindFilter.Pokemon => "Pokémon", WonderCardKindFilter.Items => "Items", _ => "All" }}", IconPath: "events"));
                     options.Add(new PadOption(Check(q.ShinyOnly) + "Shiny only", IconPath: "shiny"));
                     options.Add(new PadOption($"Status: {q.Received switch { WonderCardReceivedFilter.NotReceived => "New only", WonderCardReceivedFilter.Received => "Received", _ => "Any" }}", IconPath: "check"));
@@ -1010,6 +1015,15 @@ public static class EventGallery
                     switch (label)
                     {
                         case "Fits this save": Set(q with { CompatibleOnly = !q.CompatibleOnly }); break;
+                        case "Bank Plan targets":
+                            if (!q.BankPlanOnly && _ctx.BankPlan?.Targets.Any(t => t.WonderCards is { Count: > 0 }) != true)
+                            {
+                                await PadMenu.ShowAsync(_ctx.Host, "Bank Plan targets",
+                                    "No Wonder Card references are cached. Sync the Pokédex connection, then reopen this album.", "OK");
+                                break;
+                            }
+                            Set(q with { BankPlanOnly = !q.BankPlanOnly });
+                            break;
                         case "Shiny only": Set(q with { ShinyOnly = !q.ShinyOnly }); break;
                         case "One card per event": Set(q with { OnePerEvent = !q.OnePerEvent }); break;
                         case "Clear all filters":

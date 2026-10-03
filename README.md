@@ -133,6 +133,12 @@ the device. The server displays these observations separately from manually conf
 ownership. Neither HOME checkboxes nor acquisition/transfer confirmations are changed.
 
 The cached HOME checklist, entry notes and transfer plan remain readable when offline.
+In an open save's Wonder Card album, **More… → Bank Plan targets** shows the exact
+distributions referenced by the plan for that receiving game, including item unlocks
+and prerequisite gifts. Sync once after updating PKForge, then reopen the album to
+cache these references. The filter works offline and includes acquired targets;
+it does not change plan progress. Other album filters still apply.
+
 Failed or cancelled uploads keep their exact pending snapshot for **Retry pending sync**,
 including across app restarts. After retrying, sync once more for a fresh scan. Requests
 time out after 15 seconds and do not retry in the background. Source scans can be cancelled.
