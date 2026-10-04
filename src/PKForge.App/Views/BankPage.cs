@@ -205,7 +205,7 @@ public sealed class BankPage : ContentPage, IPadPagingHandler
     }
 
     /// <summary>A search hit lands the vault on the mon's box and slot, cursor on it.</summary>
-    private void JumpTo(BankEntry entry)
+    internal void JumpTo(BankEntry entry)
     {
         _boxIndex = Math.Clamp(entry.Box, 0, _bank.BoxCount - 1);
         _selectedSlot = entry.Slot;

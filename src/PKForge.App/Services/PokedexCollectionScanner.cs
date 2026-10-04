@@ -76,7 +76,7 @@ internal static class PokedexCollectionScanner
         }, cancellationToken);
     }
 
-    private static string SourceId(string documentId) =>
+    internal static string SourceId(string documentId) =>
         "save-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(documentId))).ToLowerInvariant();
 
     private static string Label(DetectedSave save) => string.Join(" · ",
