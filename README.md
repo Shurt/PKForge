@@ -133,6 +133,20 @@ the device. The server displays these observations separately from manually conf
 ownership. Neither HOME checkboxes nor acquisition/transfer confirmations are changed.
 
 The cached HOME checklist, entry notes and transfer plan remain readable when offline.
+**Missing in HOME, available locally** covers the whole synced living dex, with separate
+normal and shiny matches grouped by save or PKForge Bank. It shows every matching
+box/slot or party position, plus source scan times. Incomplete or omitted sources retain
+their older observations; a new successful sync is needed after upgrading to populate
+the local inventory cache. Local availability does not verify HOME transfer eligibility.
+
+The cached transfer plan includes preparation steps and their completion state,
+WonderCard details, and the existing transfer stages and notes. Plan progress stays
+read-only. **Local copies** scans the current collection using that target's matching
+rules. Opening a copy rechecks the source and slot before navigating to it, and refuses
+to replace an open save with unsaved changes. Hidden shelf saves are included.
+Target-specific WonderCard searches require a compatible open save; prerequisite and
+item gifts remain distinct from direct Pokémon gifts. Browsing never injects a gift.
+
 In an open save's Wonder Card album, **More… → Bank Plan targets** shows the exact
 distributions referenced by the plan for that receiving game, including item unlocks
 and prerequisite gifts. Sync once after updating PKForge, then reopen the album to

@@ -21,7 +21,8 @@ namespace PKForge.App.Views;
 /// </summary>
 public static class EventGallery
 {
-    public static async Task ShowAsync(Grid host, BoxBrowserViewModel viewModel, ISaveEngineSession session, int? targetSlot, Action repaint)
+    public static async Task ShowAsync(Grid host, BoxBrowserViewModel viewModel, ISaveEngineSession session, int? targetSlot, Action repaint,
+        PokedexBankPlanTarget? bankPlanTarget = null)
     {
         var services = IPlatformApplication.Current?.Services;
         var service = services?.GetService<IEventDatabaseService>();
@@ -61,7 +62,18 @@ public static class EventGallery
 
         var slot = targetSlot ?? viewModel.VisibleSlots.FirstOrDefault(s => s.Species is null)?.Slot ?? -1;
         var bankPlan = services.GetService<PokedexConnectionService>()?.State.Cache?.BankPlan;
-        var context = new AlbumContext(host, viewModel, session, service, sprites, data, history, profile, slot, targetSlot is not null, bankPlan);
+        if (bankPlanTarget is not null)
+        {
+            bankPlan = new PokedexBankPlan([bankPlanTarget]);
+            if (!entries.Any(entry => BankPlanWonderCards.Matches(entry.Gift, profile, bankPlan)))
+            {
+                await PadMenu.ShowAsync(host, bankPlanTarget.Title,
+                    "None of this target's referenced Wonder Cards can be received by the open game.", "Back");
+                return;
+            }
+        }
+        var context = new AlbumContext(host, viewModel, session, service, sprites, data, history, profile, slot, targetSlot is not null,
+            bankPlan, bankPlanTarget);
         var chosen = await GiftAlbum.ShowAsync(context, entries);
         if (chosen is null) return;
 
@@ -93,7 +105,7 @@ public static class EventGallery
     private sealed record AlbumContext(
         Grid Host, BoxBrowserViewModel ViewModel, ISaveEngineSession Session, IEventDatabaseService Service,
         ISpriteService Sprites, IGameDataService Data, InjectedGiftHistory History, EventGiftSaveProfile? Profile,
-        int TargetSlot, bool SlotChosen, PokedexBankPlan? BankPlan);
+        int TargetSlot, bool SlotChosen, PokedexBankPlan? BankPlan, PokedexBankPlanTarget? BankPlanTarget);
 
     // ── Shared painting ──────────────────────────────────────────────────────────
 
@@ -530,7 +542,7 @@ public static class EventGallery
             Grid.SetRowSpan(_overlay, Math.Max(1, host.RowDefinitions.Count));
             Grid.SetColumnSpan(_overlay, Math.Max(1, host.ColumnDefinitions.Count));
 
-            _query = WonderCardAlbum.DefaultQuery(entries);
+            _query = WonderCardAlbum.DefaultQuery(entries) with { BankPlanOnly = ctx.BankPlanTarget is not null };
             Requery(keep: null);
             _router?.Push(this);
             Kit.AnimateIn(window);
@@ -629,14 +641,15 @@ public static class EventGallery
             var size = BeginDp(c, args.Info);
             var strip = new SKRect(0, 1, size.Width - 3, size.Height - 2);
             using var title = Font(15.5f);
-            PksmPaint.HeaderStrip(c, strip, "Mystery Gift", title, Pksm.GiftPinkLight);
+            var heading = _ctx.BankPlanTarget is null ? "Mystery Gift" : "Bank Plan gifts";
+            PksmPaint.HeaderStrip(c, strip, heading, title, Pksm.GiftPinkLight);
             using var small = Font(12.5f);
             var counts = _page.Items.Count == _page.Total
                 ? $"{_page.Total} cards"
                 : $"{_page.Items.Count} of {_page.Total}";
             var received = _page.ReceivedCount > 0 ? $"  ·  {_page.ReceivedCount} received" : "";
             using var ink = new SKPaint { Color = Pksm.Ink, IsAntialias = true };
-            var text = Fit(small, counts + received, strip.Width - title.MeasureText("Mystery Gift") - 34);
+            var text = Fit(small, counts + received, strip.Width - title.MeasureText(heading) - 34);
             Text(c, text, strip.Right - 10, strip.MidY + small.Size * 0.36f, SKTextAlign.Right, small, ink);
         }
 
@@ -992,7 +1005,8 @@ public static class EventGallery
                     if (_ctx.Profile is not null)
                     {
                         options.Add(new PadOption(Check(q.CompatibleOnly) + "Fits this save", IconPath: "game"));
-                        options.Add(new PadOption(Check(q.BankPlanOnly) + "Bank Plan targets", IconPath: "bank"));
+                        options.Add(new PadOption(Check(q.BankPlanOnly) + (_ctx.BankPlanTarget is null ? "Bank Plan targets" : "This Bank Plan target"),
+                            IconPath: "bank"));
                     }
                     options.Add(new PadOption($"Gifts: {q.Kind switch { WonderCardKindFilter.Pokemon => "Pokémon", WonderCardKindFilter.Items => "Items", _ => "All" }}", IconPath: "events"));
                     options.Add(new PadOption(Check(q.ShinyOnly) + "Shiny only", IconPath: "shiny"));
@@ -1015,6 +1029,10 @@ public static class EventGallery
                     switch (label)
                     {
                         case "Fits this save": Set(q with { CompatibleOnly = !q.CompatibleOnly }); break;
+                        case "This Bank Plan target":
+                            await PadMenu.ShowAsync(_ctx.Host, _ctx.BankPlanTarget!.Title,
+                                "This shortcut stays limited to the referenced cards for this target and the open receiving game.", "OK");
+                            break;
                         case "Bank Plan targets":
                             if (!q.BankPlanOnly && _ctx.BankPlan?.Targets.Any(t => t.WonderCards is { Count: > 0 }) != true)
                             {
@@ -1028,7 +1046,13 @@ public static class EventGallery
                         case "One card per event": Set(q with { OnePerEvent = !q.OnePerEvent }); break;
                         case "Clear all filters":
                             _search.Text = "";
-                            Set(new WonderCardQuery { Sort = q.Sort, Grouping = q.Grouping, OnePerEvent = q.OnePerEvent });
+                            Set(new WonderCardQuery
+                            {
+                                Sort = q.Sort,
+                                Grouping = q.Grouping,
+                                OnePerEvent = q.OnePerEvent,
+                                BankPlanOnly = _ctx.BankPlanTarget is not null,
+                            });
                             break;
                         case { } s when s.StartsWith("Gifts:", StringComparison.Ordinal):
                             await PickAsync("Gifts", [(0, "All gifts"), (1, "Pokémon"), (2, "Items")], (int)q.Kind,

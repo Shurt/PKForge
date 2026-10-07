@@ -156,6 +156,34 @@ public static class PokedexConnectionProtocol
             {
                 throw new PokedexProtocolException("The Pokédex response contains an incomplete bank plan target.");
             }
+
+            if (target.Preparations is not null)
+            {
+                var preparationIds = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var preparation in target.Preparations)
+                {
+                    if (preparation is null || string.IsNullOrWhiteSpace(preparation.Id) ||
+                        string.IsNullOrWhiteSpace(preparation.Label) || string.IsNullOrWhiteSpace(preparation.Detail) ||
+                        !preparationIds.Add(preparation.Id))
+                    {
+                        throw new PokedexProtocolException("The Pokédex response contains an invalid bank plan preparation.");
+                    }
+                }
+            }
+
+            if (target.Match is { } match &&
+                (match.Species is null || match.Species.Count == 0 || match.Species.Any(species => species < 1) ||
+                 match.Forms?.Any(form => form < 0) == true ||
+                 match.Formats?.Any(string.IsNullOrWhiteSpace) == true))
+            {
+                throw new PokedexProtocolException("The Pokédex response contains an invalid bank plan match rule.");
+            }
+
+            if (target.Progress.Preparation?.Any(item => string.IsNullOrWhiteSpace(item.Key)) == true)
+                throw new PokedexProtocolException("The Pokédex response contains an invalid bank plan preparation status.");
+
+            if (target.WonderCards?.Any(reference => reference is null) == true)
+                throw new PokedexProtocolException("The Pokédex response contains an invalid Wonder Card reference.");
         }
     }
 }
@@ -237,22 +265,80 @@ public sealed record PokedexBankPlanTarget(
     [property: JsonPropertyName("gameProgress")] string GameProgress,
     [property: JsonPropertyName("progress")] PokedexBankPlanProgress Progress)
 {
+    [JsonPropertyName("preparations")]
+    public IReadOnlyList<PokedexBankPlanPreparation>? Preparations { get; init; }
+
+    [JsonPropertyName("match")]
+    public PokedexBankPlanMatch? Match { get; init; }
+
     // Older cached plans predate the curated Wonder Card references. A new sync fills these in.
     [JsonPropertyName("wonderCards")]
     public IReadOnlyList<PokedexWonderCardReference>? WonderCards { get; init; }
 }
 
+public sealed record PokedexBankPlanPreparation(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("detail")] string Detail);
+
+public sealed record PokedexBankPlanMatch(
+    [property: JsonPropertyName("species")] IReadOnlyList<int>? Species = null,
+    [property: JsonPropertyName("forms")] IReadOnlyList<int>? Forms = null,
+    [property: JsonPropertyName("shiny")] bool? Shiny = null,
+    [property: JsonPropertyName("formats")] IReadOnlyList<string>? Formats = null,
+    [property: JsonPropertyName("notes")] string? Notes = null);
+
 public sealed record PokedexWonderCardReference(
     [property: JsonPropertyName("sourcePath")] string SourcePath,
     [property: JsonPropertyName("games")] string Games,
-    [property: JsonPropertyName("cardId")] string CardId);
+    [property: JsonPropertyName("cardId")] string CardId)
+{
+    [JsonPropertyName("title")]
+    public string? Title { get; init; }
+
+    [JsonPropertyName("language")]
+    public string? Language { get; init; }
+
+    [JsonPropertyName("searchTerm")]
+    public string? SearchTerm { get; init; }
+
+    [JsonPropertyName("kind")]
+    public string? Kind { get; init; }
+
+    [JsonPropertyName("notes")]
+    public string? Notes { get; init; }
+
+    [JsonPropertyName("sourceUrl")]
+    public string? SourceUrl { get; init; }
+}
 
 public sealed record PokedexBankPlanProgress(
     [property: JsonPropertyName("acquired")] bool Acquired,
     [property: JsonPropertyName("archived")] bool Archived,
     [property: JsonPropertyName("inBank")] bool InBank,
     [property: JsonPropertyName("homeVerified")] bool HomeVerified,
-    [property: JsonPropertyName("notes")] string? Notes);
+    [property: JsonPropertyName("notes")] string? Notes)
+{
+    // This remains nullable so caches written before preparation tracking still load.
+    [JsonPropertyName("preparation")]
+    public IReadOnlyDictionary<string, bool>? Preparation { get; init; }
+}
+
+public sealed record PokedexInventorySource(
+    [property: JsonPropertyName("sourceId")] string SourceId,
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("observedAt")] DateTimeOffset ObservedAt,
+    [property: JsonPropertyName("receivedAt")] DateTimeOffset ReceivedAt,
+    [property: JsonPropertyName("lastAttemptComplete")] bool LastAttemptComplete,
+    [property: JsonPropertyName("lastAttemptAt")] DateTimeOffset LastAttemptAt,
+    [property: JsonPropertyName("observations")] IReadOnlyList<PokedexInventoryObservation> Observations);
+
+public sealed record PokedexInventoryObservation(
+    [property: JsonPropertyName("observation")] PokedexObservation Observation,
+    [property: JsonPropertyName("dexEntryIds")] IReadOnlyList<string> DexEntryIds,
+    [property: JsonPropertyName("mappingStatus")] string MappingStatus,
+    [property: JsonPropertyName("mappingReason")] string? MappingReason);
 
 public sealed record PokedexConnectionState
 {
@@ -262,6 +348,7 @@ public sealed record PokedexConnectionState
     public long LastSequence { get; init; }
     public PokedexSyncRequest? Pending { get; init; }
     public PokedexSyncResponse? Cache { get; init; }
+    public IReadOnlyList<PokedexInventorySource> InventorySources { get; init; } = [];
     public DateTimeOffset? LastSyncedAt { get; init; }
     public string? LastError { get; init; }
 
@@ -309,10 +396,12 @@ public sealed record PokedexConnectionState
     {
         PokedexConnectionProtocol.ValidateResponse(response);
         var completedAt = (syncedAt ?? DateTimeOffset.UtcNow).ToUniversalTime();
+        var inventory = MergeInventorySources(InventorySources, Pending, response);
         return this with
         {
             Pending = null,
             Cache = response,
+            InventorySources = inventory,
             LastSyncedAt = completedAt,
             LastError = null,
         };
@@ -338,9 +427,75 @@ public sealed record PokedexConnectionState
             LastSequence = 0,
             Pending = null,
             Cache = null,
+            InventorySources = [],
             LastSyncedAt = null,
             LastError = null,
         };
+    }
+
+    private static IReadOnlyList<PokedexInventorySource> MergeInventorySources(
+        IReadOnlyList<PokedexInventorySource>? current,
+        PokedexSyncRequest? request,
+        PokedexSyncResponse response)
+    {
+        if (request is null)
+            return current?.ToArray() ?? [];
+
+        var bySource = (current ?? []).ToDictionary(source => source.SourceId, StringComparer.Ordinal);
+        var mappings = response.Mapping
+            .GroupBy(mapping => (mapping.SourceId, mapping.SlotId))
+            .ToDictionary(group => group.Key, group => group.Last());
+
+        foreach (var source in request.Sources)
+        {
+            if (!source.Complete)
+            {
+                if (bySource.TryGetValue(source.SourceId, out var existing))
+                {
+                    bySource[source.SourceId] = existing with
+                    {
+                        Label = source.Label,
+                        Kind = source.Kind,
+                        LastAttemptComplete = false,
+                        LastAttemptAt = request.ObservedAt,
+                    };
+                }
+                continue;
+            }
+
+            var observations = source.Observations.Select(observation =>
+            {
+                if (!mappings.TryGetValue((source.SourceId, observation.SlotId), out var mapping))
+                {
+                    return new PokedexInventoryObservation(
+                        observation,
+                        [],
+                        "unmapped",
+                        "The Pokédex response did not include a mapping for this observation.");
+                }
+
+                return new PokedexInventoryObservation(
+                    observation,
+                    mapping.DexEntryIds.ToArray(),
+                    mapping.MappingStatus,
+                    mapping.MappingReason);
+            }).ToArray();
+
+            bySource[source.SourceId] = new PokedexInventorySource(
+                source.SourceId,
+                source.Label,
+                source.Kind,
+                request.ObservedAt,
+                response.ReceivedAt,
+                true,
+                request.ObservedAt,
+                observations);
+        }
+
+        return bySource.Values
+            .OrderBy(source => source.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(source => source.SourceId, StringComparer.Ordinal)
+            .ToArray();
     }
 }
 

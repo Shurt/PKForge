@@ -3,6 +3,7 @@ using PKForge.App.Services;
 using PKForge.App.Theme;
 using PKForge.App.ViewModels;
 using PKForge.Domain;
+using PKForge.Engine;
 
 namespace PKForge.App.Views;
 
@@ -605,7 +606,7 @@ public sealed class HomePage : ContentPage, IPadHandler
             case "Restore points": await PushAsync<BackupHistoryPage>(); break;
             case "About PKForge": await AboutPopup.ShowAsync(_hostGrid); break;
             case "Check for update": await CheckForUpdateAsync(automatic: false); break;
-            case "Pokedex connection": await PokedexConnectionPage.ShowAsync(_hostGrid); break;
+            case "Pokedex connection": await PokedexConnectionPage.ShowAsync(_hostGrid, OpenPokedexCopyAsync); break;
             case "3DS connection": await CheckpointTransferPage.ShowSettingsAsync(_hostGrid); break;
             case "Music": await ShowMusicAsync(); break;
             case "Misc": await ShowMiscAsync(); break;
@@ -1265,6 +1266,86 @@ public sealed class HomePage : ContentPage, IPadHandler
     {
         public object Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => convert(value);
         public object ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotSupportedException();
+    }
+
+    /// <summary>Resolve the local source again before following a cached location. Opening a
+    /// companion result never moves a Pokémon or replaces an edited live session.</summary>
+    private async Task<bool> OpenPokedexCopyAsync(string sourceId, PokedexObservation expected)
+    {
+        var services = IPlatformApplication.Current!.Services;
+        var loader = LoadingOverlay.Show(_hostGrid, "Checking local copy", "Reading its current storage location.");
+        PokedexObservation? current;
+        try
+        {
+            var sources = await PokedexCollectionScanner.ScanAsync(loader.Cancellation.Token);
+            current = sources.FirstOrDefault(source => source.SourceId == sourceId && source.Complete)?
+                .Observations.FirstOrDefault(observation => observation.SlotId == expected.SlotId);
+        }
+        finally { loader.Close(); }
+        if (current != expected)
+        {
+            await PadMenu.ShowAsync(_hostGrid, "Copy changed or unavailable",
+                "This location no longer matches the observation, or its source could not be read. Refresh local copies or sync again before opening it.", "Back");
+            return false;
+        }
+
+        if (sourceId == "bank")
+        {
+            var bank = services.GetRequiredService<IBankService>();
+            var entry = bank.GetAll().FirstOrDefault(item => item.Id.ToString() == expected.SlotId);
+            if (entry is null) return false;
+            var page = services.GetRequiredService<BankPage>();
+            page.JumpTo(entry);
+            await Navigation.PushAsync(page);
+            return true;
+        }
+
+        var sessions = services.GetRequiredService<ISaveSessionService>();
+        var browser = services.GetRequiredService<BoxBrowserViewModel>();
+        var openId = sessions.Current?.Document.DocumentId;
+        if (openId is null || PokedexCollectionScanner.SourceId(openId) != sourceId)
+        {
+            var save = _viewModel.Saves.Concat(_viewModel.HiddenSaves)
+                .FirstOrDefault(item => PokedexCollectionScanner.SourceId(item.DocumentId) == sourceId);
+            if (save is null)
+            {
+                await PadMenu.ShowAsync(_hostGrid, "Save unavailable", "This save is no longer linked on this device.", "Back");
+                return false;
+            }
+            if (sessions.Current is { } opened && sessions.CurrentSession is { } live
+                && !live.Serialize().Span.SequenceEqual(opened.Snapshot.OriginalBytes.Span))
+            {
+                await PadMenu.ShowAsync(_hostGrid, "Open save has changes",
+                    "Finish saving changes in the open save before switching to this copy.", "Back");
+                return false;
+            }
+            if (!await ChooseEditionOnceAsync(save)) return false;
+            save = _viewModel.Saves.Concat(_viewModel.HiddenSaves)
+                .FirstOrDefault(item => item.DocumentId == save.DocumentId) ?? save;
+            if (save.RequiresExtraCare && !await PadMenu.ConfirmAsync(_hostGrid, "Emulated console storage",
+                $"{save.GameLabel} lives inside {save.Emulator}'s emulated storage. Close the emulator before opening it.", "Connect"))
+                return false;
+            await _viewModel.OpenAsync(save);
+            if (!_viewModel.OpenedSave)
+            {
+                await PadMenu.ShowAsync(_hostGrid, "Save could not open", _viewModel.Status, "Back");
+                return false;
+            }
+        }
+
+        // The file may have changed between the scan and opening it. Verify the actual
+        // session too rather than landing on a different occupant of the same slot.
+        if (sessions.CurrentSession is not { } session
+            || PokedexObservationReader.ReadSave(session).FirstOrDefault(item => item.SlotId == expected.SlotId) != expected)
+        {
+            await PadMenu.ShowAsync(_hostGrid, "Copy changed", "The save changed while opening it. Refresh local copies or sync again.", "Back");
+            return false;
+        }
+        if (browser.Save is null) browser.RefreshFromCurrentSession();
+        var boxPage = services.GetRequiredService<BoxBrowserPage>();
+        browser.JumpTo(expected.Box, expected.Slot);
+        await Navigation.PushAsync(boxPage);
+        return true;
     }
 
     private async Task OpenSaveAsync(DetectedSave save)
