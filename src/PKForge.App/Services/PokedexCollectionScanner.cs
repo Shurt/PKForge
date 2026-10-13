@@ -16,30 +16,44 @@ internal static class PokedexCollectionScanner
         var engine = services.GetRequiredService<ISaveEngine>();
         var access = services.GetRequiredService<ISaveFileAccess>();
         var bank = services.GetRequiredService<IBankService>();
+        var receipts = services.GetRequiredService<IEventReceiptStore>();
         var writer = services.GetRequiredService<ISafeSaveWriter>();
         var picker = services.GetRequiredService<SavePickerViewModel>();
         // Hiding a save only hides its picker row; it still belongs to the collection.
         var saves = picker.Saves.Concat(picker.HiddenSaves).ToArray();
         var entries = bank.GetAll().ToArray();
         var sources = new List<PokedexSource>();
+        PokedexObservationReader.CapturedSave? openSnapshot = null;
+        string? openLabel = null;
         var openId = sessions.Current?.Document.DocumentId;
         if (sessions.CurrentSession is { } live && openId is not null)
         {
             var save = saves.FirstOrDefault(s => s.DocumentId == openId);
             var label = save is null ? sessions.Current!.Document.DisplayName : Label(save);
+            openLabel = label + " · open session";
             try
             {
                 // Snapshot the UI-owned live session before starting background reads.
-                sources.Add(new(SourceId(openId), label + " · open session", "save", true,
-                    PokedexObservationReader.ReadSave(live, Unsupported(save, live, openId, writer))));
+                openSnapshot = PokedexObservationReader.CaptureSave(live, Unsupported(save, live, openId, writer), cancellationToken);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception)
             {
-                sources.Add(new(SourceId(openId), label, "save", false, []));
+                sources.Add(new(SourceId(openId), label, "save", false, []) { EventScanComplete = false });
             }
         }
         return Task.Run<IReadOnlyList<PokedexSource>>(async () =>
         {
+            var archiveLoaded = EventArchive.EnsureAllLoaded(cancellationToken);
+            var eventMatcher = new EventObservationMatcher(receipts);
+            if (openSnapshot is not null && openId is not null)
+            {
+                var observations = openSnapshot.Read(eventMatcher, cancellationToken);
+                sources.Add(new(SourceId(openId), openLabel!, "save", true, observations)
+                {
+                    EventScanComplete = archiveLoaded && !openSnapshot.Unsupported && EventComplete(observations, eventMatcher),
+                });
+            }
             foreach (var save in saves.DistinctBy(s => s.DocumentId))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -48,13 +62,17 @@ internal static class PokedexCollectionScanner
                 {
                     var bytes = await access.ReadAsync(save.DocumentId, cancellationToken);
                     using var session = engine.OpenSession(bytes, save.EngineHint, save.Format);
-                    sources.Add(new(SourceId(save.DocumentId), Label(save), "save", true,
-                        PokedexObservationReader.ReadSave(session, Unsupported(save, session, save.DocumentId, writer))));
+                    var unsupported = Unsupported(save, session, save.DocumentId, writer);
+                    var observations = PokedexObservationReader.ReadSave(session, unsupported, eventMatcher, cancellationToken);
+                    sources.Add(new(SourceId(save.DocumentId), Label(save), "save", true, observations)
+                    {
+                        EventScanComplete = archiveLoaded && !unsupported && EventComplete(observations, eventMatcher),
+                    });
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
                 catch (Exception)
                 {
-                    sources.Add(new(SourceId(save.DocumentId), Label(save), "save", false, []));
+                    sources.Add(new(SourceId(save.DocumentId), Label(save), "save", false, []) { EventScanComplete = false });
                 }
             }
             var bankObservations = new List<PokedexObservation>();
@@ -64,17 +82,24 @@ internal static class PokedexCollectionScanner
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    if (PokedexObservationReader.ReadBank(entry, bank.GetData(entry.Id)) is { } observation)
+                    if (PokedexObservationReader.ReadBank(entry, bank.GetData(entry.Id), eventMatcher, cancellationToken) is { } observation)
                         bankObservations.Add(observation);
                 }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
                 catch (Exception) { complete = false; }
             }
             // An incomplete Bank read must never remove previously reported holdings.
-            sources.Add(new("bank", "PKForge Bank", "bank", complete, complete ? bankObservations : []));
+            sources.Add(new("bank", "PKForge Bank", "bank", complete, complete ? bankObservations : [])
+            {
+                EventScanComplete = complete && archiveLoaded && EventComplete(bankObservations, eventMatcher),
+            });
             cancellationToken.ThrowIfCancellationRequested();
             return sources;
         }, cancellationToken);
     }
+
+    private static bool EventComplete(IReadOnlyList<PokedexObservation> observations, EventObservationMatcher matcher) =>
+        matcher.IsComplete && observations.All(observation => observation.EventScanComplete == true);
 
     internal static string SourceId(string documentId) =>
         "save-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(documentId))).ToLowerInvariant();

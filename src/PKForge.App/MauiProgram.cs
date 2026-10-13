@@ -36,6 +36,8 @@ public static class MauiProgram
         builder.Services.AddSingleton<TrainerProfileStore>();
         builder.Services.AddSingleton<IGenerationOwnershipSettings>(sp => sp.GetRequiredService<TrainerProfileStore>());
         builder.Services.AddSingleton<ILegalizerService, LegalizerService>();
+        builder.Services.AddSingleton<IEventReceiptStore>(_ =>
+            new JsonEventReceiptStore(Path.Combine(FileSystem.AppDataDirectory, "event-receipts.json")));
         builder.Services.AddSingleton<IEventDatabaseService, EventDatabaseService>();
         builder.Services.AddSingleton<IEncounterLookup, EncounterLookupService>();
         builder.Services.AddSingleton<IBackupService>(_ =>

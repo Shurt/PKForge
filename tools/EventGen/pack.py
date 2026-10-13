@@ -6,14 +6,14 @@ Usage: python3 pack.py <EventsGallery checkout> <output directory>
 Only Released/ gift files are packed (Unreleased and non-gift media stay out).
 Bundle format (events-gN.bin.gz): gzip of [u32 count] then per file
 [u16 name length][utf-8 relative path][u32 length][raw gift bytes].
-The app extracts the matching generation at runtime and feeds the folder to
+The app extracts all generations at runtime and feeds the folder to
 PKHeX's EncounterEvent.RefreshMGDB, merging it with the embedded database.
 """
 import gzip, os, struct, sys
 
 GENS = {
     4: {".wc4", ".pcd", ".pgt"},
-    5: {".pgf"},
+    5: {".pgf", ".wc5full"},
     6: {".wc6", ".wc6full"},
     7: {".wc7", ".wc7full", ".wb7", ".wb7full"},
     8: {".wc8", ".wc8full", ".wb8", ".wa8"},
@@ -34,7 +34,7 @@ def pack(gallery: str, out_dir: str) -> None:
                     files.append(os.path.join(base, name))
         files.sort()
         out = os.path.join(out_dir, f"events-g{gen}.bin.gz")
-        with gzip.open(out, "wb", compresslevel=9) as gz:
+        with gzip.GzipFile(out, "wb", compresslevel=9, mtime=0) as gz:
             gz.write(struct.pack("<I", len(files)))
             for path in files:
                 rel = os.path.relpath(path, root).encode("utf-8")

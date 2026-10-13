@@ -30,7 +30,8 @@ public sealed record WonderCardSource(
 
         string? language = null;
         var collection = new List<string>();
-        foreach (var folder in segments[..^1])
+        var start = segments.Length >= 3 && segments[0] == "Released" && segments[1].StartsWith("Gen ", StringComparison.Ordinal) ? 2 : 0;
+        foreach (var folder in segments[start..^1])
         {
             if (GiftLanguages.IsTag(folder)) language ??= folder.ToUpperInvariant();
             else if (!Structural.Contains(folder)) collection.Add(folder);

@@ -10,6 +10,19 @@ public sealed class BankPlanWonderCardTests
     private const string SetDiancie = "Wondercards/ENG/0525 XY - OCT2014 Diancie (ENG) (3 Set IVs).wc6";
 
     [Fact]
+    public void CanonicalGalleryPrefixMatchesWithoutBeingAddedTwice()
+    {
+        var profile = new EventGiftSaveProfile(6, 2, "X");
+        var gift = Gift(0, $"Released/Gen 6/{SetDiancie}", 525, 719, 6, 2);
+        var plan = Plan([Reference(6, SetDiancie, "525", "X / Y")]);
+
+        Assert.True(BankPlanWonderCards.Matches(gift, profile, plan));
+        Assert.False(BankPlanWonderCards.Matches(gift with { Generation = 5 }, profile with { Generation = 5 }, plan));
+        Assert.Equal(WonderCardSource.Parse(SetDiancie)!.Collection,
+            WonderCardSource.Parse($"Released/Gen 6/{SetDiancie}")!.Collection);
+    }
+
+    [Fact]
     public void BankPlanMatchesTheExactReferencedVariantBeforeCollapsing()
     {
         var profile = new EventGiftSaveProfile(6, 2, "Pokemon X");

@@ -250,14 +250,19 @@ public sealed class EventDatabaseMetadataTests
         using var session = engine.OpenBlankSession(5);
         var before = new EventDatabaseService().GetGifts(session);
         var first = before.First(g => g.Kind == EventGiftKind.Pokemon);
-        // Re-add an embedded card through the gallery: it must not appear twice.
+        // Re-add an embedded card through the gallery, including the language/version
+        // restrictions kept outside raw PGF bytes: it must not appear twice.
         var raw = EncounterEvent.MGDB_G5.First(g => g.CardID == first.CardId && g.Species == first.Species);
-        var folder = WithGallery(root => File.WriteAllBytes(Path.Combine(root, "dup.pgf"), raw.Write()));
+        var full = new byte[WC5Full.Size];
+        raw.Write().CopyTo(full);
+        full[PGF.Size + 2] = raw.RestrictVersion;
+        full[^5] = raw.RestrictLanguage;
+        var folder = WithGallery(root => File.WriteAllBytes(Path.Combine(root, "dup.wc5full"), full));
         try
         {
             var after = new EventDatabaseService().GetGifts(session);
             Assert.Equal(before.Count, after.Count);
-            Assert.Equal("dup.pgf", after.Single(g => g.CardId == first.CardId && g.Title == first.Title && g.Species == first.Species).Details!.SourceFile);
+            Assert.Equal("dup.wc5full", after.Single(g => g.CardId == first.CardId && g.Title == first.Title && g.Species == first.Species).Details!.SourceFile);
         }
         finally
         {
