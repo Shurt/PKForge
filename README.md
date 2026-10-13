@@ -153,6 +153,39 @@ and prerequisite gifts. Sync once after updating PKForge, then reopen the album 
 cache these references. The filter works offline and includes acquired targets;
 it does not change plan progress. Other album filters still apply.
 
+Event observations also accompany sync. PKForge loads the released Gen 4–9 Wonder Cards,
+including Switch formats, and checks every compatible event template against the Pokémon's
+origin evolution chain. Event matching covers English Pokémon for this personal checklist;
+species inventory still includes Pokémon in every language. Cherish Balls are not required.
+Each candidate identifies the exact
+Gallery file, such as `Released/Gen 8/SwSh/...wc8`, rather than a card number or extraction path.
+Compatibility alone reports `possible`; it does not prove that distribution was received.
+
+Receiving or exporting an archive-resolved Pokémon through the Wonder Card album records its source in
+`event-receipts.json` in app-private storage. A SHA-256 fingerprint of origin traits keeps
+that receipt attached across box moves, training and evolution. Sync reports `recorded`
+only for an unambiguous receipt whose card still matches. Identical entities recorded from
+different cards, or identical cards at multiple Gallery paths, remain possible candidates.
+Copies with identical origin traits cannot be distinguished from clones. Origin edits,
+egg hatching and transfers that rewrite origin fields can invalidate a receipt; compatible
+cards can still appear as possible matches for manual confirmation on the Pokédex site.
+Local observations never check off acquired or HOME progress.
+
+These are optional protocol-version-1 additions. Observations carry `entityFingerprint`,
+`eventMatches` with `sourcePath` and `status`, and `eventScanComplete`. Sources also carry
+`eventScanComplete`, including empty sources. Matches are limited to 100 per Pokémon.
+A missing archive, unreadable receipt ledger, unknown format or truncated candidate list
+reports an incomplete event scan while leaving the inventory scan usable. Gen 1–3 Pokémon
+file distributions and item/flag encounter unlocks have no Wonder Card matcher here.
+Older cached pending requests omit the additions and retry unchanged. Deploy the Pokédex
+backend's event-sync support before this client; an older strict backend can reject the
+extra fields, and its rejected pending request must be retried after the backend update.
+
+The bundled Gallery snapshot is
+[`154d81be88453f6f78ec1d6d86e85fe0f2f5c240`](https://github.com/projectpokemon/EventsGallery/tree/154d81be88453f6f78ec1d6d86e85fe0f2f5c240).
+Regenerate its bundles with `python3 tools/EventGen/pack.py <Gallery checkout> src/PKForge.App/Resources/Events`.
+The packer includes released Gen 5 full-card containers and writes reproducible gzip bundles.
+
 Failed or cancelled uploads keep their exact pending snapshot for **Retry pending sync**,
 including across app restarts. After retrying, sync once more for a fresh scan. Requests
 time out after 15 seconds and do not retry in the background. Source scans can be cancelled.

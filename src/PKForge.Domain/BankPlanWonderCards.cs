@@ -11,10 +11,12 @@ public static class BankPlanWonderCards
             || string.IsNullOrWhiteSpace(gift.Details?.SourceFile) || plan?.Targets is null)
             return false;
 
-        // The bundled archive omits Released/Gen N; keep that generation in the comparison
-        // so identical filenames or card numbers in another generation cannot match.
+        // Older caches use generation-relative paths. New archives retain the canonical
+        // Gallery prefix so event sync can identify the same file across apps.
         var source = gift.Details.SourceFile.Replace('\\', '/');
-        var fullPath = $"Released/Gen {gift.Generation}/{source}";
+        var prefix = $"Released/Gen {gift.Generation}/";
+        if (source.StartsWith("Released/", StringComparison.Ordinal) && !source.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        var fullPath = source.StartsWith(prefix, StringComparison.Ordinal) ? source : prefix + source;
         return plan.Targets.Any(target => target?.WonderCards?.Any(reference =>
             reference is not null
             && int.TryParse(reference.CardId, NumberStyles.None, CultureInfo.InvariantCulture, out var cardId)

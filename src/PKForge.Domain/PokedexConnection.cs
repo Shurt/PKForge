@@ -98,6 +98,18 @@ public static class PokedexConnectionProtocol
                         $"Pokédex source '{source.SourceId}' contains duplicate slot ID '{observation.SlotId}'.",
                         nameof(request));
                 }
+                if (observation.EntityFingerprint is { } fingerprint && !EventObservationRules.IsFingerprint(fingerprint))
+                    throw new ArgumentException("The Pokédex request contains an invalid entity fingerprint.", nameof(request));
+                if (observation.EventMatches is { } matches)
+                {
+                    if (matches.Count > EventObservationRules.MaxMatches
+                        || matches.Any(match => match is null || !EventObservationRules.IsSourcePath(match.SourcePath)
+                            || match.Status is not ("recorded" or "possible"))
+                        || matches.Select(match => match.SourcePath).Distinct(StringComparer.Ordinal).Count() != matches.Count
+                        || matches.Count(match => match.Status == "recorded") > 1
+                        || (matches.Count > 0 && observation.EntityFingerprint is null))
+                        throw new ArgumentException("The Pokédex request contains invalid event matches.", nameof(request));
+                }
             }
         }
     }
@@ -217,7 +229,11 @@ public sealed record PokedexSource(
     [property: JsonPropertyName("label")] string Label,
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("complete")] bool Complete,
-    [property: JsonPropertyName("observations")] IReadOnlyList<PokedexObservation> Observations);
+    [property: JsonPropertyName("observations")] IReadOnlyList<PokedexObservation> Observations)
+{
+    [JsonPropertyName("eventScanComplete"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? EventScanComplete { get; init; }
+}
 
 public sealed record PokedexObservation(
     [property: JsonPropertyName("slotId")] string SlotId,
@@ -230,7 +246,22 @@ public sealed record PokedexObservation(
     [property: JsonPropertyName("shiny")] bool Shiny,
     [property: JsonPropertyName("nickname")] string? Nickname,
     [property: JsonPropertyName("box")] int Box,
-    [property: JsonPropertyName("slot")] int Slot);
+    [property: JsonPropertyName("slot")] int Slot)
+{
+    // Null fields stay absent on disk and on the wire, preserving old retry snapshots.
+    [JsonPropertyName("entityFingerprint"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? EntityFingerprint { get; init; }
+
+    [JsonPropertyName("eventMatches"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PokedexEventMatch>? EventMatches { get; init; }
+
+    [JsonPropertyName("eventScanComplete"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? EventScanComplete { get; init; }
+}
+
+public sealed record PokedexEventMatch(
+    [property: JsonPropertyName("sourcePath")] string SourcePath,
+    [property: JsonPropertyName("status")] string Status);
 
 public sealed record PokedexSyncResponse(
     [property: JsonPropertyName("protocolVersion")] int ProtocolVersion,
@@ -371,7 +402,10 @@ public sealed record PokedexConnectionState
 
         var snapshot = sources.Select(source => source with
         {
-            Observations = source.Observations?.ToArray()
+            Observations = source.Observations?.Select(observation => observation with
+            {
+                EventMatches = observation.EventMatches?.ToArray(),
+            }).ToArray()
                 ?? throw new ArgumentException("Each Pokédex source needs an observation list.", nameof(sources)),
         }).ToArray();
         var nextSequence = LastSequence + 1;

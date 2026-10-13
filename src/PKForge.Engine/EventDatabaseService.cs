@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using PKForge.Domain;
 using PKHeX.Core;
 
@@ -11,18 +11,28 @@ namespace PKForge.Engine;
 /// </summary>
 public sealed class EventDatabaseService : IEventDatabaseService
 {
-    /// <summary>Card content hash → the gallery file it was loaded from (event name, language).</summary>
-    private static readonly ConcurrentDictionary<string, string> Sources = new(StringComparer.Ordinal);
+    private readonly IEventReceiptStore? _receipts;
+    public EventDatabaseService(IEventReceiptStore? receipts = null) => _receipts = receipts;
+
+    internal sealed record ArchiveCard(MysteryGift Gift, string[] SourcePaths);
+    internal sealed record ArchiveIndex(Dictionary<string, string[]> Sources, ArchiveCard[] Cards, bool Complete);
+    private static ArchiveIndex _archive = new(new(StringComparer.Ordinal), [], false);
+    internal static ArchiveIndex Archive => Volatile.Read(ref _archive);
 
     /// <summary>
     /// Remembers which gallery file every card in <paramref name="folder"/> came from, so the
     /// album can show English event names, languages and regions. PKHeX's local tables keep
     /// only the card bytes; this keeps the file names beside them, keyed by content.
     /// </summary>
-    public static void IndexArchive(string folder)
+    public static void IndexArchive(string folder, bool complete = true)
     {
-        Sources.Clear();
-        if (!Directory.Exists(folder)) return;
+        var sources = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var cards = new Dictionary<string, MysteryGift>(StringComparer.Ordinal);
+        if (!Directory.Exists(folder))
+        {
+            Volatile.Write(ref _archive, new(new(StringComparer.Ordinal), [], false));
+            return;
+        }
         foreach (var file in Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories))
         {
             try
@@ -30,26 +40,42 @@ public sealed class EventDatabaseService : IEventDatabaseService
                 var info = new FileInfo(file);
                 if (!MysteryGift.IsMysteryGift(info.Length)) continue;
                 if (MysteryGift.GetMysteryGift(File.ReadAllBytes(file), info.Extension) is not { } gift) continue;
-                if (ContentKey(gift) is { } key)
-                    Sources.TryAdd(key, Path.GetRelativePath(folder, file).Replace('\\', '/'));
+                if (ContentKey(gift) is not { } key) continue;
+                var source = Path.GetRelativePath(folder, file).Replace('\\', '/');
+                if (!sources.TryGetValue(key, out var paths)) sources[key] = paths = [];
+                paths.Add(source);
+                cards.TryAdd(key, gift);
             }
             catch (Exception e) when (e is not OutOfMemoryException)
             {
                 // One unreadable file never costs the album its other names.
+                complete = false;
             }
         }
+        var indexed = sources.ToDictionary(pair => pair.Key,
+            pair => pair.Value.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(), StringComparer.Ordinal);
+        var matchable = cards.Select(pair => new ArchiveCard(pair.Value,
+                indexed[pair.Key].Where(EventObservationRules.IsSourcePath).ToArray()))
+            .Where(card => card.Gift.IsEntity && card.Gift.Species > 0 && card.SourcePaths.Length > 0).ToArray();
+        Volatile.Write(ref _archive, new(indexed, matchable, complete && matchable.Length > 0));
     }
 
-    /// <summary>A content fingerprint (FNV-1a 64 + length): cheap, platform-neutral, and
-    /// equal exactly when two cards carry the same bytes.</summary>
-    private static string? ContentKey(MysteryGift gift)
+    /// <summary>Normalize mutable receive dates and preserve restrictions held outside card bytes.
+    /// Every matching file is retained; identical cards cannot prove which distribution was selected.</summary>
+    internal static string? ContentKey(MysteryGift gift)
     {
         if (gift is not DataMysteryGift data) return null;
-        var bytes = data.Write();
-        var hash = 14695981039346656037UL;
-        foreach (var b in bytes)
-            hash = (hash ^ b) * 1099511628211UL;
-        return $"{bytes.Length:x}:{hash:x16}";
+        var bytes = data.Write().ToArray();
+        var restrictions = gift switch
+        {
+            PGF card => $"{card.RestrictVersion}:{card.RestrictLanguage}",
+            WC6 card => $"{card.RestrictVersion}:{card.RestrictLanguage}",
+            WC7 card => $"{card.RestrictVersion}:{card.RestrictLanguage}",
+            _ => "",
+        };
+        if (gift is PGF) bytes.AsSpan(0xAC, 4).Clear();
+        if (gift is WC6 or WC7) bytes.AsSpan(0x4C, 4).Clear();
+        return $"{gift.Type}:{restrictions}:{Convert.ToHexString(SHA256.HashData(bytes))}";
     }
 
     public IReadOnlyList<EventGift> GetGifts(ISaveEngineSession session)
@@ -68,7 +94,7 @@ public sealed class EventDatabaseService : IEventDatabaseService
             if (kind is null) continue;
 
             var key = ContentKey(gift);
-            var source = key is null ? null : Sources.GetValueOrDefault(key);
+            var source = key is null ? null : Archive.Sources.GetValueOrDefault(key)?.FirstOrDefault();
             var entry = new EventGift(
                 index,
                 gift.CardTitle.Replace('　', ' ').Trim(),
@@ -195,10 +221,11 @@ public sealed class EventDatabaseService : IEventDatabaseService
     /// gen 4 cards and gen 8+ cards carry none, so they report null (undated).</summary>
     private static int? CardYear(MysteryGift gift, string? source) => CardDate(gift, source)?.Year;
 
-    /// <summary>PKHeX stamps today's date into cards read from .wc6full / .wc7full
+    /// <summary>PKHeX stamps today's date into cards read from .wc5full / .wc6full / .wc7full
     /// distribution files (the date they would be received), so those carry no real date.</summary>
     private static bool IsReceiveStamped(string? source) =>
-        source is not null && (source.EndsWith(".wc6full", StringComparison.OrdinalIgnoreCase)
+        source is not null && (source.EndsWith(".wc5full", StringComparison.OrdinalIgnoreCase)
+            || source.EndsWith(".wc6full", StringComparison.OrdinalIgnoreCase)
             || source.EndsWith(".wc7full", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>The printed date, or the start of the known distribution window (Switch cards).</summary>
@@ -243,7 +270,9 @@ public sealed class EventDatabaseService : IEventDatabaseService
             return new GenerationOutcome(false, "This gift could not be converted for your save.");
 
         save.SetBoxSlotAtIndex(created, box, slot, EntityImportSettings.None);
-        return new GenerationOutcome(true, "Here's your gift. Take good care of it!");
+        // Read back the stored entity; save import can update handler/checksum fields.
+        var receiptWarning = RecordReceipt(gift, save.GetBoxSlotAtIndex(box, slot));
+        return new GenerationOutcome(true, "Here's your gift. Take good care of it!" + receiptWarning);
     }
 
     public GenerationOutcome ReceiveItems(ISaveEngineSession session, int giftId)
@@ -302,7 +331,24 @@ public sealed class EventDatabaseService : IEventDatabaseService
         if (created.Species == 0) return null;
         var data = new byte[created.SIZE_PARTY];
         created.WriteDecryptedDataParty(data);
+        RecordReceipt(gifts[giftId], created);
         return new SlotExport(data, SafeName(created.FileName), EntityBytes.FormatOf(created));
+    }
+
+    private string RecordReceipt(MysteryGift gift, PKM entity)
+    {
+        if (_receipts is null || EventEntityFingerprint.Create(entity) is not { } fingerprint
+            || ContentKey(gift) is not { } key || Archive.Sources.GetValueOrDefault(key) is not { } paths) return "";
+        var sources = paths.Where(EventObservationRules.IsSourcePath).ToArray();
+        if (sources.Length == 0) return "";
+        try { _receipts.Record(fingerprint, sources); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            // A provenance write failure must not undo an already-delivered gift or corrupt a save.
+            Console.WriteLine($"PKForge event receipt: {error.Message}");
+            return " Its event receipt could not be saved; sync will report possible matches.";
+        }
+        return "";
     }
 
     private static string SafeName(string name) =>
